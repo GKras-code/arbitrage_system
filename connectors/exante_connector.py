@@ -498,6 +498,81 @@ class EXANTEConnector:
         url = f"{EXANTE_MD_API}/{EXANTE_API_VERSION}/groups/{group_id}"
         return await self.send_request("GET", url)
 
+    async def get_all_futures(self) -> list[dict] | bool:
+        """Получить все доступные фьючерсы EXANTE.
+
+        Каталог групп содержит группы с типом FUTURE, но отдельная группа может
+        также включать опционы. Поэтому результат дополнительно фильтруется по
+        полю symbolType и дедуплицируется по symbolId.
+
+        Returns
+        -------
+        list[dict] | False
+            Полный список фьючерсов или False, если не удалось загрузить
+            каталог либо одну из групп.
+        """
+        groups = await self.get_groups()
+        if not isinstance(groups, list):
+            logger.error("EXANTE get_all_futures: не удалось получить группы")
+            return False
+
+        future_group_ids: list[str] = []
+        for group in groups:
+            types = group.get("types") or []
+            if isinstance(types, str):
+                types = [types]
+            if "FUTURE" not in {str(item).upper() for item in types}:
+                continue
+
+            group_id = str(group.get("group") or "").strip()
+            if group_id and group_id not in future_group_ids:
+                future_group_ids.append(group_id)
+
+        total_groups = len(future_group_ids)
+        print(
+            f"EXANTE: найдено FUTURE-групп: {total_groups}. "
+            "Начинаю загрузку групп...",
+            flush=True,
+        )
+        futures_by_id: dict[str, dict] = {}
+        for group_index, group_id in enumerate(future_group_ids, start=1):
+            print(
+                f"EXANTE FUTURES: группа {group_index}/{total_groups} "
+                f"({group_id}), накоплено контрактов: {len(futures_by_id)}...",
+                flush=True,
+            )
+            await asyncio.sleep(1.0)  # небольшая пауза между запросами
+            symbols = await self.get_group_symbols(group_id)
+            if not isinstance(symbols, list):
+                logger.error(
+                    "EXANTE get_all_futures: не удалось получить группу '%s'",
+                    group_id,
+                )
+                continue
+
+            for symbol in symbols:
+                symbol_type = str(
+                    symbol.get("symbolType") or symbol.get("type") or ""
+                ).upper()
+                symbol_id = str(
+                    symbol.get("symbolId") or symbol.get("id") or ""
+                ).strip()
+                if symbol_type == "FUTURE" and symbol_id:
+                    futures_by_id[symbol_id] = symbol
+
+            # print(
+            #     f"EXANTE FUTURES: группа {group_index}/{total_groups} готова, "
+            #     f"всего контрактов: {len(futures_by_id)}.",
+            #     flush=True,
+            # )
+
+        futures = list(futures_by_id.values())
+        print(
+            f"EXANTE FUTURES: загрузка завершена, контрактов: {len(futures)}.",
+            flush=True,
+        )
+        return futures
+
     # ------------------------------------------------------------------
     # MD API — Daily Change
     # ------------------------------------------------------------------
@@ -1311,15 +1386,50 @@ async def main():
     # else:
     #     print("  нет данных")
 
-    # # 5. Информация о символе
-    # print("\n=== Symbol AAPL.NASDAQ ===")
-    # sym = await connector.get_symbol("AAPL.NASDAQ")
-    # if sym:
-    #     print(f"  name={sym.get('name')}  ticker={sym.get('ticker')}  "
-    #           f"type={sym.get('symbolType') or sym.get('type')}  "
-    #           f"currency={sym.get('currency')}")
-    # else:
-    #     print("  не найден")
+    # 5. Информация о символе
+    print("\n=== Symbol AAPL.NASDAQ ===")
+    sym = await connector.get_symbol("AAPL.NASDAQ")
+    if sym:
+        print(
+            f"  name={sym.get('name')}  ticker={sym.get('ticker')}  "
+            f"type={sym.get('symbolType') or sym.get('type')}  "
+            f"currency={sym.get('currency')}"
+        )
+    else:
+        print("  не найден")
+
+    # 6. Список бирж и инструментов биржи
+    print("\n=== Exchanges ===")
+    exchanges = await connector.get_exchanges()
+    if isinstance(exchanges, list):
+        print(f"  Всего бирж: {len(exchanges)}")
+        for exc in exchanges[:10]:
+            print(f"  {exc.get('id','?'):12s}  {exc.get('name','')}")
+        if exchanges:
+            exc_id = exchanges[0].get("id", "")
+            print(f"\n=== Инструменты биржи {exc_id} ===")
+            exc_syms = await connector.get_exchange_symbols(exc_id)
+            if isinstance(exc_syms, list):
+                print(f"  Найдено: {len(exc_syms)}")
+                for es in exc_syms[:5]:
+                    print(
+                        f"  symbolId={es.get('symbolId','?'):20s}  "
+                        f"ticker={es.get('ticker','?'):10s}  "
+                        f"type={es.get('symbolType','?')}"
+                    )
+            else:
+                print(f"  ошибка: {exc_syms}")
+    else:
+        print(f"  ошибка: {exchanges}")
+
+    # 7. Группы
+    print("\n=== Groups ===")
+    groups = await connector.get_groups()
+    if isinstance(groups, list):
+        print(f"  Всего групп: {len(groups)}")
+        for grp in groups[:10]:
+            print(f"  {grp.get('group','?'):30s}  exchange={grp.get('exchange','?')}  "
+                  f"name={grp.get('name','')}")
 
     # # 6. Активные заявки
     # print("\n=== Активные заявки ===")

@@ -83,6 +83,21 @@ ORDERS_EDIT_URL = f"{ORDERS_URL}/edit"
 ORDERS_SEARCH_URL = (
     "https://be.broker.ru/trade-api-bff-order-details/api/v1/orders/search"
 )
+INSTRUMENTS_BY_TICKERS_URL = os.getenv(
+    "BCS_INSTRUMENTS_BY_TICKERS_URL",
+    "https://be.broker.ru/trade-api-information-service/api/v1/instruments/by-tickers",
+)
+INSTRUMENTS_BY_TYPE_URL = os.getenv(
+    "BCS_INSTRUMENTS_BY_TYPE_URL",
+    "https://be.broker.ru/trade-api-information-service/api/v1/instruments/by-type",
+)
+
+# Типы инструментов для by-type
+INSTRUMENT_TYPES = {
+    "CURRENCY", "STOCK", "FOREIGN_STOCK", "BONDS", "NOTES",
+    "DEPOSITARY_RECEIPTS", "EURO_BONDS", "MUTUAL_FUNDS", "ETF",
+    "FUTURES", "OPTIONS", "GOODS", "INDICES",
+}
 WS_MARKET_DATA_URL = (
     "wss://ws.broker.ru/trade-api-market-data-connector/"
     "api/v1/market-data/ws"
@@ -503,6 +518,129 @@ class BCSConnector:
             return False
         return res
 
+    async def search_instruments_by_tickers(
+        self,
+        tickers: list[str],
+        page: int = 0,
+        size: int = 20,
+    ) -> dict | list | bool:
+        """
+        Получить инструменты по тикеру.
+
+        POST https://be.broker.ru/trade-api-information-service/api/v1/instruments/by-tickers
+
+        Base URL: https://be.broker.ru/trade-api-information-service
+
+        Параметры
+        ---------
+        tickers : list[str]
+            Список тикеров для поиска (например ["SBER", "GAZP"]).
+        page : int
+            Номер страницы (опционально).
+        size : int
+            Размер страницы (опционально). Если объектов меньше size — выборка
+            завершена; при равенстве size нужна следующая страница.
+
+        Returns
+        -------
+        list[dict] | dict | False
+            Массив инструментов (200 OK) или False.
+        """
+        body = {"tickers": [t.strip() for t in tickers if t.strip()]}
+        if not body["tickers"]:
+            return []
+
+        return await self.send_request(
+            "POST",
+            INSTRUMENTS_BY_TICKERS_URL,
+            param={"page": page, "size": size},
+            body=body,
+        )
+
+    async def get_instruments_by_type(
+        self,
+        instrument_type: str,
+        page: int = 0,
+        size: int = 20,
+    ) -> list | bool:
+        """
+        Получить инструменты по типу.
+
+        GET https://be.broker.ru/trade-api-information-service/api/v1/instruments/by-type
+
+        Base URL: https://be.broker.ru/trade-api-information-service
+
+        Параметры
+        ---------
+        instrument_type : str
+            Тип инструмента. Допустимые значения:
+            CURRENCY, STOCK, FOREIGN_STOCK, BONDS, NOTES, DEPOSITARY_RECEIPTS,
+            EURO_BONDS, MUTUAL_FUNDS, ETF, FUTURES, OPTIONS, GOODS, INDICES.
+        page : int
+            Номер страницы (опционально).
+        size : int
+            Размер страницы (опционально). Если объектов меньше size — выборка
+            завершена; при равенстве size нужна следующая страница.
+
+        Returns
+        -------
+        list[dict] | False
+            Массив инструментов (200 OK) или False.
+        """
+        normalized_type = instrument_type.strip().upper()
+        if normalized_type not in INSTRUMENT_TYPES:
+            logger.error("BCS get_instruments_by_type: недопустимый тип '%s'", instrument_type)
+            return False
+
+        return await self.send_request(
+            "GET",
+            INSTRUMENTS_BY_TYPE_URL,
+            param={"type": normalized_type, "page": page, "size": size},
+        )
+
+    async def get_all_futures(
+        self,
+        page_size: int = 100,
+        request_delay: float = 0.1,
+    ) -> list[dict] | bool:
+        """Получить все фьючерсы BCS с постраничной загрузкой.
+
+        Параметры
+        ---------
+        page_size : int
+            Число инструментов в одном запросе.
+        request_delay : float
+            Пауза в секундах между запросами страниц.
+
+        Returns
+        -------
+        list[dict] | False
+            Полный список фьючерсов или False при ошибке запроса.
+        """
+        if page_size < 1:
+            raise ValueError("page_size должен быть положительным")
+        if request_delay < 0:
+            raise ValueError("request_delay не может быть отрицательным")
+
+        futures: list[dict] = []
+        page = 0
+        while True:
+            batch = await self.get_instruments_by_type(
+                "FUTURES", page=page, size=page_size
+            )
+            if batch is False:
+                return False
+            if not batch:
+                return futures
+
+            futures.extend(batch)
+            if len(batch) < page_size:
+                return futures
+
+            page += 1
+            if request_delay:
+                await asyncio.sleep(request_delay)
+
     async def create_order(
         self,
         ticker: str,
@@ -831,7 +969,26 @@ async def main():
     connector = BCSConnector()
 
     try:
-        # Портфель
+        # 1. Поиск инструментов по тикеру
+        print("\n=== Поиск инструментов (search_instruments_by_tickers) ===")
+        instruments = await connector.search_instruments_by_tickers(
+            ["SBER", "GAZP", "ROSN"], size=5
+        )
+        if isinstance(instruments, list):
+            print(f"  Найдено инструментов: {len(instruments)}")
+            for inst in instruments[:5]:
+                boards = inst.get("boards", [])
+                class_code = boards[0].get("classCode", "?") if boards else "?"
+                print(
+                    f"  ticker={inst.get('ticker','?'):6s}  "
+                    f"classCode={class_code:6s}  "
+                    f"shortName={inst.get('shortName',''):20s}  "
+                    f"type={inst.get('instrumentType','?')}"
+                )
+        else:
+            print(f"  ошибка: {instruments}")
+
+        # 2. Портфель
         print("\n=== Портфель ===")
         portfolio = await connector.get_portfolio()
         if portfolio:
@@ -845,7 +1002,23 @@ async def main():
         else:
             print("  ошибка получения портфеля")
 
-        # Заявки
+        # 3. Получение инструментов по типу (фьючерсы)
+        print("\n=== Инструменты по типу FUTURES (get_instruments_by_type) ===")
+        futures = await connector.get_instruments_by_type("FUTURES", size=10)
+        if isinstance(futures, list):
+            print(f"  Найдено фьючерсов на странице: {len(futures)}")
+            for inst in futures[:10]:
+                boards = inst.get("boards", [])
+                class_code = boards[0].get("classCode", "?") if boards else "?"
+                short_name = inst.get("shortName", "") or ""
+                ticker = inst.get("ticker", "?")
+                print(f"  ticker={ticker:10s}  classCode={class_code:6s}  shortName={short_name:30s}")
+            if len(futures) == 10:
+                print("  ➜ На странице 10 записей — возможно, есть ещё. Запросите page=1")
+        else:
+            print(f"  ошибка: {futures}")
+
+        # 4. Заявки
         print("\n=== Заявки ===")
         orders = await connector.get_orders(size=10)
         if orders:
@@ -855,7 +1028,7 @@ async def main():
         else:
             print("  ошибка получения заявок")
 
-        # Подписка на стакан — 10 сообщений
+        # 5. Подписка на стакан — 10 сообщений
         print("\n=== Подписка на стакан SBER (10 сообщений) ===")
 
         ob_count = 0

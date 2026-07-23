@@ -25,6 +25,7 @@ services:
       EXANTE_TRADE_API: ${EXANTE_TRADE_API:-https://api-live.exante.eu/trade}
       EXANTE_API_VERSION: ${EXANTE_API_VERSION:-3.0}
       EXANTE_SSL_VERIFY: ${EXANTE_SSL_VERIFY:-true}
+      JWT_SECRET: ${JWT_SECRET:-change-this-jwt-secret-before-production}
     ports:
       - "8000:8000"             # опционально — прямой доступ к API
     volumes:
