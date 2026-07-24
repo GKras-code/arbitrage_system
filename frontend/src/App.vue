@@ -64,7 +64,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const token = ref(localStorage.getItem('arbitrage_token') || '')
 const username = ref(localStorage.getItem('arbitrage_username') || '')
@@ -87,6 +87,8 @@ const searchTimers = { exante: null, bcs: null }
 const editingCell = ref(null)
 const editorInput = ref(null)
 const invalidCells = ref({})
+let priceEvents = null
+let priceRefreshTimer = null
 
 function authHeaders() { return { Authorization: `Bearer ${token.value}` } }
 async function login() {
@@ -97,11 +99,12 @@ async function login() {
     if (!response.ok) throw new Error(data.detail || 'Не удалось выполнить вход')
     token.value = data.access_token; username.value = data.username
     localStorage.setItem('arbitrage_token', token.value); localStorage.setItem('arbitrage_username', username.value)
-    await loadPairs()
+    await loadPairs(); connectPriceEvents()
   } catch (error) { loginError.value = error.message } finally { loginPending.value = false }
 }
-async function loadPairs() {
-  loading.value = true; tableError.value = ''
+async function loadPairs(showLoading = true) {
+  if (showLoading) loading.value = true
+  tableError.value = ''
   try {
     const response = await fetch('/api/arbitrage-pairs', { headers: authHeaders() })
     if (response.status === 401) return logout()
@@ -109,7 +112,15 @@ async function loadPairs() {
     if (!response.ok) throw new Error(data.detail || 'Не удалось получить данные')
     pairs.value = data.pairs
     updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
-  } catch (error) { tableError.value = error.message } finally { loading.value = false }
+  } catch (error) { tableError.value = error.message } finally { if (showLoading) loading.value = false }
+}
+function connectPriceEvents() {
+  priceEvents?.close()
+  priceEvents = new EventSource(`/api/arbitrage-pairs/events?token=${encodeURIComponent(token.value)}`)
+  priceEvents.onmessage = () => {
+    if (priceRefreshTimer) return
+    priceRefreshTimer = setTimeout(() => { priceRefreshTimer = null; loadPairs(false) }, 100)
+  }
 }
 async function addPair() {
   addingPair.value = true; tableError.value = ''
@@ -196,13 +207,14 @@ function scheduleInstrumentSearch(provider, query) {
   const normalized = (query || '').trim()
   searchTimers[provider] = setTimeout(() => { loadInstrumentOptions(provider, normalized) }, normalized ? 180 : 0)
 }
-function logout() { token.value = ''; username.value = ''; pairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
+function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
 function formatDate(value) { return value ? new Intl.DateTimeFormat('ru-RU').format(new Date(`${value}T00:00:00`)) : '—' }
 function formatNumber(value, maximumFractionDigits = 2) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits }).format(value) }
 function formatPercent(value) { return value === null || value === undefined ? '—' : `${formatNumber(value)}%` }
 function numberClass(value) { return value > 0 ? 'positive' : value < 0 ? 'negative' : '' }
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
-onMounted(() => { if (authenticated.value) { loadPairs(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
+onMounted(() => { if (authenticated.value) { loadPairs(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
+onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
 </script>
 
 <style>

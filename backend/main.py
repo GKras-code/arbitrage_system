@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -18,8 +19,9 @@ from time import monotonic
 from typing import Literal
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -30,14 +32,19 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from connectors.bcs_connector import BCSConnector
+from connectors.exante_connector import EXANTEConnector
 from db import create_pool
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-jwt-secret-before-production")
 PASSWORD_SALT = b"arbitrage-system-user-v1"
 bearer_scheme = HTTPBearer(auto_error=False)
 REFERENCE_CACHE_TTL_SECONDS = 15 * 60
+BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
 
 _instrument_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
+_market_data_tasks: list[asyncio.Task] = []
+_price_update_subscribers: set[asyncio.Queue[None]] = set()
 
 
 class LoginRequest(BaseModel):
@@ -268,6 +275,105 @@ async def initialize_database() -> None:
         )
 
 
+async def _publish_price_update() -> None:
+    """Notify connected browser clients after a price is saved."""
+    for queue in tuple(_price_update_subscribers):
+        queue.put_nowait(None)
+
+
+async def _save_market_price(column: str, instrument: str, price: object) -> None:
+    """Store the latest price and recalculate the CME-to-FORTS price ratio."""
+    if price is None or not instrument:
+        return
+    try:
+        value = Decimal(str(price))
+    except Exception:
+        return
+
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        updated = await connection.fetch(
+            f"UPDATE arbitrage_pairs SET {column} = $1::numeric, "
+            "price_ratio = ROUND("
+            "CASE WHEN COALESCE("
+            f"{'$1::numeric' if column == 'cme_price' else 'cme_price'}, 0::numeric) <> 0::numeric "
+            "AND COALESCE("
+            f"{'$1::numeric' if column == 'forts_price' else 'forts_price'}, 0::numeric) <> 0::numeric "
+            "THEN "
+            f"{'$1::numeric' if column == 'cme_price' else 'cme_price'} / "
+            f"{'$1::numeric' if column == 'forts_price' else 'forts_price'} "
+            "ELSE NULL END, 1) WHERE "
+            f"{'cme_name' if column == 'cme_price' else 'forts_name'} = $2 RETURNING id",
+            value,
+            instrument,
+        )
+    if updated:
+        await _publish_price_update()
+
+
+async def _stream_bcs_prices(instruments: list[dict[str, str]]) -> None:
+    """Receive BCS quote updates and persist the `last` price."""
+    connector = BCSConnector()
+    try:
+        async def on_quote(quote: dict) -> None:
+            if quote.get("responseType") == "Quotes":
+                await _save_market_price("forts_price", str(quote.get("ticker") or ""), quote.get("last"))
+
+        await connector.stream_quotes(instruments, on_quote)
+    finally:
+        await connector.close()
+
+
+async def _stream_exante_prices(symbol_ids: list[str]) -> None:
+    """Receive EXANTE trade updates and persist the `price` field."""
+    connector = EXANTEConnector()
+    try:
+        async def on_trade(trade: dict) -> None:
+            await _save_market_price("cme_price", str(trade.get("symbolId") or ""), trade.get("price"))
+
+        await connector.stream_trades(symbol_ids, on_trade, buffer_size=1)
+    finally:
+        await connector.close()
+
+
+async def _restart_market_subscriptions() -> None:
+    """Subscribe exactly to the instruments currently present in arbitrage_pairs."""
+    global _market_data_tasks
+    for task in _market_data_tasks:
+        task.cancel()
+    if _market_data_tasks:
+        await asyncio.gather(*_market_data_tasks, return_exceptions=True)
+
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        cme_symbols = await connection.fetch("SELECT DISTINCT cme_name FROM arbitrage_pairs WHERE cme_name <> ''")
+        forts_tickers = await connection.fetch("SELECT DISTINCT forts_name FROM arbitrage_pairs WHERE COALESCE(forts_name, '') <> ''")
+
+    _market_data_tasks = []
+    if cme_symbols and (os.getenv("EXANTE_JWT") or os.getenv("EXANTE_SECRET_KEY")):
+        _market_data_tasks.append(asyncio.create_task(
+            _stream_exante_prices([row["cme_name"] for row in cme_symbols]),
+            name="exante-price-stream",
+        ))
+    if forts_tickers and os.getenv("BCS_REFRESH_TOKEN"):
+        instruments = [
+            {"ticker": row["forts_name"], "classCode": BCS_FUTURES_CLASS_CODE}
+            for row in forts_tickers
+        ]
+        _market_data_tasks.append(asyncio.create_task(
+            _stream_bcs_prices(instruments), name="bcs-price-stream"
+        ))
+
+
+async def _stop_market_subscriptions() -> None:
+    global _market_data_tasks
+    for task in _market_data_tasks:
+        task.cancel()
+    if _market_data_tasks:
+        await asyncio.gather(*_market_data_tasks, return_exceptions=True)
+    _market_data_tasks = []
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> str:
@@ -287,7 +393,9 @@ async def get_current_user(
 async def lifespan(_: FastAPI):
     """Жизненный цикл приложения: инициализация / cleanup."""
     await initialize_database()
+    await _restart_market_subscriptions()
     yield
+    await _stop_market_subscriptions()
     pool = await create_pool()
     await pool.close()
 
@@ -355,6 +463,32 @@ async def list_arbitrage_pairs(_: str = Depends(get_current_user)):
             """
         )
     return {"pairs": [dict(row) for row in rows]}
+
+
+@app.get("/api/arbitrage-pairs/events")
+async def arbitrage_pair_events(token: str = Query(min_length=1)):
+    """SSE stream used by the table to refresh after a live price update."""
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError as error:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Недействительный токен") from error
+
+    async def events():
+        queue: asyncio.Queue[None] = asyncio.Queue()
+        _price_update_subscribers.add(queue)
+        try:
+            yield "data: {\"type\": \"connected\"}\n\n"
+            while True:
+                await queue.get()
+                yield "data: {\"type\": \"prices\"}\n\n"
+        finally:
+            _price_update_subscribers.discard(queue)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/arbitrage-pairs", status_code=status.HTTP_201_CREATED)
@@ -425,6 +559,7 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
             "SELECT id, cme_name, cme_expiration, forts_name, forts_expiration, cme_lot, forts_lot FROM arbitrage_pairs WHERE id = $1",
             row["id"],
         )
+    await _restart_market_subscriptions()
     return dict(row)
 
 
