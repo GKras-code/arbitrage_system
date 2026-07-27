@@ -35,15 +35,19 @@ if ROOT not in sys.path:
 from connectors.bcs_connector import BCSConnector
 from connectors.exante_connector import EXANTEConnector
 from db import create_pool
+from sync_bcs_market_data import sync_market_data as sync_bcs_market_data
+from sync_exante_market_data import sync_market_data as sync_exante_market_data
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-jwt-secret-before-production")
 PASSWORD_SALT = b"arbitrage-system-user-v1"
 bearer_scheme = HTTPBearer(auto_error=False)
 REFERENCE_CACHE_TTL_SECONDS = 15 * 60
+REFERENCE_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
 
 _instrument_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 _market_data_tasks: list[asyncio.Task] = []
+_reference_sync_task: asyncio.Task | None = None
 _price_update_subscribers: set[asyncio.Queue[None]] = set()
 
 
@@ -374,6 +378,34 @@ async def _stop_market_subscriptions() -> None:
     _market_data_tasks = []
 
 
+async def _sync_reference_data_periodically() -> None:
+    """Обновлять справочники BCS и EXANTE раз в сутки."""
+    while True:
+        try:
+            bcs_count = await sync_bcs_market_data()
+            print(f"Справочник BCS обновлен: {bcs_count} инструментов.", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"Ошибка обновления справочника BCS: {error}", flush=True)
+        try:
+            exante_count = await sync_exante_market_data()
+            print(f"Справочник EXANTE обновлен: {exante_count} инструментов.", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"Ошибка обновления справочника EXANTE: {error}", flush=True)
+        await asyncio.sleep(REFERENCE_SYNC_INTERVAL_SECONDS)
+
+
+async def _stop_reference_data_sync() -> None:
+    global _reference_sync_task
+    if _reference_sync_task is not None:
+        _reference_sync_task.cancel()
+        await asyncio.gather(_reference_sync_task, return_exceptions=True)
+        _reference_sync_task = None
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> str:
@@ -392,9 +424,14 @@ async def get_current_user(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Жизненный цикл приложения: инициализация / cleanup."""
+    global _reference_sync_task
     await initialize_database()
     await _restart_market_subscriptions()
+    _reference_sync_task = asyncio.create_task(
+        _sync_reference_data_periodically(), name="reference-data-sync"
+    )
     yield
+    await _stop_reference_data_sync()
     await _stop_market_subscriptions()
     pool = await create_pool()
     await pool.close()

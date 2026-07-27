@@ -9,7 +9,7 @@ from connectors.exante_connector import EXANTEConnector
 from db import create_pool
 
 TABLE_NAME = "exante_market_data"
-SPECIFICATION_REQUEST_DELAY = 0.7
+SPECIFICATION_REQUEST_DELAY = 0.9
 RATE_LIMIT_RETRY_DELAY = 30
 SPECIFICATION_RETRIES = 3
 
