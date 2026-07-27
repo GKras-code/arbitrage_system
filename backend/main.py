@@ -11,7 +11,7 @@ import os
 import sys
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import pbkdf2_hmac
 from hmac import compare_digest
@@ -42,7 +42,7 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-this-jwt-secret-before-production")
 PASSWORD_SALT = b"arbitrage-system-user-v1"
 bearer_scheme = HTTPBearer(auto_error=False)
 REFERENCE_CACHE_TTL_SECONDS = 15 * 60
-REFERENCE_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
+REFERENCE_SYNC_HOUR_UTC = 3
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
 
 _instrument_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
@@ -378,9 +378,22 @@ async def _stop_market_subscriptions() -> None:
     _market_data_tasks = []
 
 
+def _seconds_until_reference_sync() -> float:
+    """Рассчитать задержку до ближайшего запуска в 03:00 UTC."""
+    now = datetime.now(timezone.utc)
+    scheduled = now.replace(
+        hour=REFERENCE_SYNC_HOUR_UTC, minute=0, second=0, microsecond=0
+    )
+    if scheduled <= now:
+        scheduled += timedelta(days=1)
+    return (scheduled - now).total_seconds()
+
+
 async def _sync_reference_data_periodically() -> None:
-    """Обновлять справочники BCS и EXANTE раз в сутки."""
+    """Обновлять справочники BCS и EXANTE каждый день в 03:00 UTC."""
     while True:
+        # Фиксированное время не зависит от момента запуска или перезапуска API.
+        await asyncio.sleep(_seconds_until_reference_sync())
         try:
             bcs_count = await sync_bcs_market_data()
             print(f"Справочник BCS обновлен: {bcs_count} инструментов.", flush=True)
@@ -395,7 +408,6 @@ async def _sync_reference_data_periodically() -> None:
             raise
         except Exception as error:
             print(f"Ошибка обновления справочника EXANTE: {error}", flush=True)
-        await asyncio.sleep(REFERENCE_SYNC_INTERVAL_SECONDS)
 
 
 async def _stop_reference_data_sync() -> None:
@@ -427,6 +439,7 @@ async def lifespan(_: FastAPI):
     global _reference_sync_task
     await initialize_database()
     await _restart_market_subscriptions()
+    # Планировщик стартует вместе с API и сам ждёт ближайшие 03:00 UTC.
     _reference_sync_task = asyncio.create_task(
         _sync_reference_data_periodically(), name="reference-data-sync"
     )
