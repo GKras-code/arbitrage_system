@@ -359,7 +359,8 @@ def _calculate_pair_metrics(
         return dte, None, None, None
 
     diff = forts_price * price_ratio - cme_price - virt_0
-    diff_percent = diff * lot_size / total_margin
+    # Храним процентные пункты, поскольку фронтенд добавляет к значению "%".
+    diff_percent = diff * lot_size / total_margin * Decimal("100")
     diff_ytm_margin = diff_percent / dte * Decimal("365")
     return dte, diff, diff_percent, diff_ytm_margin
 
