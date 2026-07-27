@@ -12,7 +12,7 @@ import sys
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from hashlib import pbkdf2_hmac
 from hmac import compare_digest
 from time import monotonic
@@ -37,18 +37,23 @@ from connectors.exante_connector import EXANTEConnector
 from db import create_pool
 from sync_bcs_market_data import sync_market_data as sync_bcs_market_data
 from sync_exante_market_data import sync_market_data as sync_exante_market_data
+from sync_forts_margin import sync_forts_margins
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-jwt-secret-before-production")
 PASSWORD_SALT = b"arbitrage-system-user-v1"
 bearer_scheme = HTTPBearer(auto_error=False)
 REFERENCE_CACHE_TTL_SECONDS = 15 * 60
 REFERENCE_SYNC_HOUR_UTC = 3
+FORTS_MARGIN_SYNC_INTERVAL_SECONDS = 3 * 60 * 60
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
+USD_RATE_CACHE_TTL_SECONDS = 600
 
 _instrument_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 _market_data_tasks: list[asyncio.Task] = []
 _reference_sync_task: asyncio.Task | None = None
+_forts_margin_sync_task: asyncio.Task | None = None
 _price_update_subscribers: set[asyncio.Queue[None]] = set()
+_usd_rate_cache: tuple[float, Decimal] | None = None
 
 
 class LoginRequest(BaseModel):
@@ -238,6 +243,7 @@ async def initialize_database() -> None:
                 forts_price NUMERIC(18, 4),
                 price_ratio NUMERIC(18, 4),
                 forts_margin_rub NUMERIC(18, 2),
+                forts_margin_updated_at TIMESTAMPTZ,
                 forts_lot NUMERIC(18, 4),
                 dte INTEGER,
                 diff NUMERIC(18, 4),
@@ -246,6 +252,10 @@ async def initialize_database() -> None:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """
+        )
+        await connection.execute(
+            "ALTER TABLE arbitrage_pairs "
+            "ADD COLUMN IF NOT EXISTS forts_margin_updated_at TIMESTAMPTZ"
         )
         await connection.execute(
             """
@@ -285,6 +295,133 @@ async def _publish_price_update() -> None:
         queue.put_nowait(None)
 
 
+def _as_decimal(value: object) -> Decimal | None:
+    """Преобразовать значение БД или API в конечное Decimal."""
+    if value is None:
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _calculate_pair_metrics(
+    pair: dict,
+    usd_rate: Decimal,
+    today: date,
+) -> tuple[int | None, Decimal | None, Decimal | None, Decimal | None]:
+    """Рассчитать DTE, diff, доходность на ГО для одной арбитражной пары."""
+    expirations = [
+        expiration
+        for expiration in (pair["cme_expiration"], pair["forts_expiration"])
+        if expiration is not None
+    ]
+    dte = (min(expirations) - today).days if expirations else None
+
+    values = {
+        name: _as_decimal(pair[name])
+        for name in (
+            "forts_price",
+            "price_ratio",
+            "cme_price",
+            "virt_0",
+            "cme_lot",
+            "forts_lot",
+            "cme_margin",
+            "forts_margin_rub",
+        )
+    }
+    if (
+        dte is None
+        or dte <= 0
+        or any(value is None for value in values.values())
+        or usd_rate <= 0
+    ):
+        return dte, None, None, None
+
+    forts_price = values["forts_price"]
+    price_ratio = values["price_ratio"]
+    cme_price = values["cme_price"]
+    virt_0 = values["virt_0"]
+    cme_lot = values["cme_lot"]
+    forts_lot = values["forts_lot"]
+    cme_margin = values["cme_margin"]
+    forts_margin_rub = values["forts_margin_rub"]
+    if cme_lot <= 0 or forts_lot <= 0:
+        return dte, None, None, None
+
+    lot_size = max(cme_lot, forts_lot)
+    # Приводим FORTS ГО к размеру большего лота и переводим его в USD.
+    forts_margin_sum = forts_margin_rub * (lot_size / min(cme_lot, forts_lot)) / usd_rate
+    total_margin = cme_margin + forts_margin_sum
+    if total_margin <= 0:
+        return dte, None, None, None
+
+    diff = forts_price * price_ratio - cme_price - virt_0
+    diff_percent = diff * lot_size / total_margin
+    diff_ytm_margin = diff_percent / dte * Decimal("365")
+    return dte, diff, diff_percent, diff_ytm_margin
+
+
+async def _get_usd_rub_rate() -> Decimal | None:
+    """Получить последнюю цену USD/RUB TOD и кэшировать её на минуту."""
+    global _usd_rate_cache
+    if _usd_rate_cache and monotonic() - _usd_rate_cache[0] < USD_RATE_CACHE_TTL_SECONDS:
+        return _usd_rate_cache[1]
+    if not os.getenv("BCS_REFRESH_TOKEN"):
+        return None
+
+    connector = BCSConnector()
+    try:
+        price = await connector.get_last_trade_price()
+    finally:
+        await connector.close()
+
+    usd_rate = _as_decimal(price)
+    if usd_rate is not None and usd_rate > 0:
+        _usd_rate_cache = (monotonic(), usd_rate)
+        return usd_rate
+    return None
+
+
+async def _refresh_arbitrage_metrics() -> bool:
+    """Пересчитать показатели всех пар с актуальным курсом USD/RUB TOD."""
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT id, cme_expiration, forts_expiration, cme_price, cme_margin,
+                   cme_lot, virt_0, forts_price, price_ratio, forts_margin_rub,
+                   forts_lot
+            FROM arbitrage_pairs
+            """
+        )
+
+    usd_rate = await _get_usd_rub_rate()
+    if usd_rate is None:
+        return False
+
+    today = date.today()
+    updates = [
+        (diff, diff_percent, diff_ytm_margin, dte, row["id"])
+        for row in rows
+        for dte, diff, diff_percent, diff_ytm_margin in [
+            _calculate_pair_metrics(dict(row), usd_rate, today)
+        ]
+    ]
+    async with pool.acquire() as connection:
+        await connection.executemany(
+            """
+            UPDATE arbitrage_pairs
+            SET diff = $1, diff_percent = $2, diff_ytm_margin = $3, dte = $4
+            WHERE id = $5
+            """,
+            updates,
+        )
+    return bool(updates)
+
+
 async def _save_market_price(column: str, instrument: str, price: object) -> None:
     """Store the latest price and recalculate the CME-to-FORTS price ratio."""
     if price is None or not instrument:
@@ -312,6 +449,7 @@ async def _save_market_price(column: str, instrument: str, price: object) -> Non
             instrument,
         )
     if updated:
+        await _refresh_arbitrage_metrics()
         await _publish_price_update()
 
 
@@ -418,6 +556,30 @@ async def _stop_reference_data_sync() -> None:
         _reference_sync_task = None
 
 
+async def _sync_forts_margins_periodically() -> None:
+    """Обновлять ГО FORTS сразу после запуска и затем каждые три часа."""
+    while True:
+        try:
+            updated = await sync_forts_margins()
+            print(f"ГО FORTS обновлено: {updated} тикеров.", flush=True)
+            if updated:
+                await _refresh_arbitrage_metrics()
+                await _publish_price_update()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"Ошибка обновления ГО FORTS: {error}", flush=True)
+        await asyncio.sleep(FORTS_MARGIN_SYNC_INTERVAL_SECONDS)
+
+
+async def _stop_forts_margin_sync() -> None:
+    global _forts_margin_sync_task
+    if _forts_margin_sync_task is not None:
+        _forts_margin_sync_task.cancel()
+        await asyncio.gather(_forts_margin_sync_task, return_exceptions=True)
+        _forts_margin_sync_task = None
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> str:
@@ -436,14 +598,18 @@ async def get_current_user(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Жизненный цикл приложения: инициализация / cleanup."""
-    global _reference_sync_task
+    global _reference_sync_task, _forts_margin_sync_task
     await initialize_database()
     await _restart_market_subscriptions()
     # Планировщик стартует вместе с API и сам ждёт ближайшие 03:00 UTC.
     _reference_sync_task = asyncio.create_task(
         _sync_reference_data_periodically(), name="reference-data-sync"
     )
+    _forts_margin_sync_task = asyncio.create_task(
+        _sync_forts_margins_periodically(), name="forts-margin-sync"
+    )
     yield
+    await _stop_forts_margin_sync()
     await _stop_reference_data_sync()
     await _stop_market_subscriptions()
     pool = await create_pool()
@@ -491,22 +657,14 @@ async def current_user(username: str = Depends(get_current_user)):
 
 @app.get("/api/arbitrage-pairs")
 async def list_arbitrage_pairs(_: str = Depends(get_current_user)):
+    await _refresh_arbitrage_metrics()
     pool = await create_pool()
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
             SELECT id, cme_name, cme_expiration, cme_price, cme_margin, cme_lot, virt_0,
                    forts_name, forts_expiration, forts_price, price_ratio, forts_margin_rub,
-                   forts_lot,
-                   CASE
-                       WHEN cme_expiration IS NULL AND forts_expiration IS NULL THEN NULL
-                       WHEN cme_expiration IS NULL THEN forts_expiration - CURRENT_DATE
-                       WHEN forts_expiration IS NULL THEN cme_expiration - CURRENT_DATE
-                       ELSE LEAST(
-                           cme_expiration - CURRENT_DATE,
-                           forts_expiration - CURRENT_DATE
-                       )
-                   END AS dte,
+                   forts_lot, dte,
                    diff, diff_percent, diff_ytm_margin
             FROM arbitrage_pairs
             ORDER BY id
@@ -610,6 +768,12 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
             row["id"],
         )
     await _restart_market_subscriptions()
+    if bcs_ticker:
+        try:
+            await sync_forts_margins([bcs_ticker])
+            await _refresh_arbitrage_metrics()
+        except Exception as error:
+            print(f"Ошибка первичной загрузки ГО FORTS для {bcs_ticker}: {error}", flush=True)
     return dict(row)
 
 
@@ -645,6 +809,8 @@ async def update_pair_manual_value(
         )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пара не найдена")
+    await _refresh_arbitrage_metrics()
+    await _publish_price_update()
     return {"id": row["id"], "field": request.field, "value": row["value"]}
 
 

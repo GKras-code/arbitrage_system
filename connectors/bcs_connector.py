@@ -91,6 +91,10 @@ INSTRUMENTS_BY_TYPE_URL = os.getenv(
     "BCS_INSTRUMENTS_BY_TYPE_URL",
     "https://be.broker.ru/trade-api-information-service/api/v1/instruments/by-type",
 )
+QUOTES_URL = os.getenv(
+    "BCS_QUOTES_URL",
+    "https://be.broker.ru/trade-api-market-data-connector/api/v1/quotes",
+)
 
 # Типы инструментов для by-type
 INSTRUMENT_TYPES = {
@@ -641,6 +645,61 @@ class BCSConnector:
             if request_delay:
                 await asyncio.sleep(request_delay)
 
+    
+    async def get_last_trade_price(
+        self,
+        ticker: str = "USD000000TOD",
+        class_code: str = "CETS",
+    ) -> float | None:
+        """Получить цену последней сделки, в том числе вне торгов.
+
+        Метод использует REST-котировки: поле ``last`` содержит последнюю
+        известную цену сделки и доступно, даже когда новые сделки не идут.
+
+        Returns
+        -------
+        float | None
+            Цена последней сделки или None, если API не вернул её.
+        """
+        ticker = ticker.strip()
+        class_code = class_code.strip()
+        if not ticker or not class_code:
+            raise ValueError("ticker и class_code не должны быть пустыми")
+
+        response = await self.send_request(
+            "POST",
+            QUOTES_URL,
+            body={"instruments": [{"ticker": ticker, "classCode": class_code}]},
+        )
+        if isinstance(response, dict):
+            records = response.get("records", [])
+        elif isinstance(response, list):
+            records = response
+        else:
+            logger.error("BCS get_last_trade_price: %s", response)
+            return None
+
+        if not isinstance(records, list):
+            logger.error("BCS get_last_trade_price: некорректный ответ %s", response)
+            return None
+
+        for quote in records:
+            if not isinstance(quote, dict):
+                continue
+            if (
+                quote.get("ticker") == ticker
+                and quote.get("classCode") == class_code
+            ):
+                last = quote.get("last")
+                return _f(last, default=None) if last is not None else None
+
+        logger.warning(
+            "BCS get_last_trade_price: котировка не найдена для %s/%s",
+            ticker,
+            class_code,
+        )
+        return None
+
     async def create_order(
         self,
         ticker: str,
@@ -969,7 +1028,29 @@ async def main():
     connector = BCSConnector()
 
     try:
-        # 1. Поиск инструментов по тикеру
+        # 0. Последняя сделка по USD/RUB TOD
+        print("\n=== Последняя сделка USD000000TOD ===")
+        last_trade_price = await connector.get_last_trade_price()
+        if last_trade_price is None:
+            print("  цена последней сделки не найдена")
+        else:
+            print(f"  last={last_trade_price}")
+
+        # 1. Все валютные инструменты (CURRENCY)
+        print("\n=== Все валютные инструменты (get_all_currencies) ===")
+        currencies = await connector.get_all_currencies(page_size=50)
+        if isinstance(currencies, list):
+            print(f"  Всего валютных инструментов: {len(currencies)}")
+            for inst in currencies:
+                boards = inst.get("boards", [])
+                class_code = boards[0].get("classCode", "?") if boards else "?"
+                short_name = inst.get("shortName", "") or ""
+                ticker = inst.get("ticker", "?")
+                print(f"  ticker={ticker:10s}  classCode={class_code:6s}  shortName={short_name:20s}")
+        else:
+            print(f"  ошибка: {currencies}")
+
+        # 2. Поиск инструментов по тикеру
         print("\n=== Поиск инструментов (search_instruments_by_tickers) ===")
         instruments = await connector.search_instruments_by_tickers(
             ["SBER", "GAZP", "ROSN"], size=5
@@ -988,7 +1069,7 @@ async def main():
         else:
             print(f"  ошибка: {instruments}")
 
-        # 2. Портфель
+        # 3. Портфель
         print("\n=== Портфель ===")
         portfolio = await connector.get_portfolio()
         if portfolio:
@@ -1002,7 +1083,7 @@ async def main():
         else:
             print("  ошибка получения портфеля")
 
-        # 3. Получение инструментов по типу (фьючерсы)
+        # 4. Получение инструментов по типу (фьючерсы)
         print("\n=== Инструменты по типу FUTURES (get_instruments_by_type) ===")
         futures = await connector.get_instruments_by_type("FUTURES", size=10)
         if isinstance(futures, list):
@@ -1018,7 +1099,7 @@ async def main():
         else:
             print(f"  ошибка: {futures}")
 
-        # 4. Заявки
+        # 5. Заявки
         print("\n=== Заявки ===")
         orders = await connector.get_orders(size=10)
         if orders:
@@ -1028,7 +1109,7 @@ async def main():
         else:
             print("  ошибка получения заявок")
 
-        # 5. Подписка на стакан — 10 сообщений
+        # 6. Подписка на стакан — 10 сообщений
         print("\n=== Подписка на стакан SBER (10 сообщений) ===")
 
         ob_count = 0

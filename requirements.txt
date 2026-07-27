@@ -1,3 +1,4 @@
 aiohttp>=3.9
+certifi>=2024.2.2
 python-dotenv>=1.0
 PyJWT>=2.8
