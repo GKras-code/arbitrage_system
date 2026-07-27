@@ -48,7 +48,7 @@
         <p v-if="tableError" class="form-error table-error">{{ tableError }}</p>
         <section class="table-section">
           <div class="table-toolbar"><span><i></i> CME / FORTS</span><span>{{ pairs.length }} инструмент{{ pairEnding }}</span></div>
-          <div class="table-wrap"><table><colgroup><col class="col-cme-name" /><col class="col-date" /><col class="col-price" /><col class="col-margin" /><col class="col-lot" /><col class="col-virt" /><col class="col-forts-name" /><col class="col-date" /><col class="col-price" /><col class="col-ratio" /><col class="col-margin" /><col class="col-lot" /><col class="col-dte" /><col class="col-diff" /><col class="col-percent" /><col class="col-ytm" /></colgroup><thead><tr>
+          <div class="table-wrap"><table ref="tableRef"><colgroup><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /></colgroup><thead><tr>
             <th>CME name</th><th>Дата exp</th><th>Price</th><th>CME margin</th><th>Lot</th><th>Virt_0</th><th>FORTS name</th><th>Дата exp</th><th>Price</th><th>Price ratio</th><th>FORTS margin, RUB</th><th>Lot</th><th>DTE</th><th>Diff</th><th>Diff, %</th><th>Diff, YTM margin</th>
           </tr></thead><tbody>
             <tr v-if="loading"><td colspan="16" class="empty-state">Загрузка данных...</td></tr>
@@ -89,6 +89,9 @@ const editorInput = ref(null)
 const invalidCells = ref({})
 let priceEvents = null
 let priceRefreshTimer = null
+let tableWidthUnlockTimer = null
+let tableWidthsLocked = false
+const tableRef = ref(null)
 
 function authHeaders() { return { Authorization: `Bearer ${token.value}` } }
 async function login() {
@@ -111,8 +114,26 @@ async function loadPairs(showLoading = true) {
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || 'Не удалось получить данные')
     pairs.value = data.pairs
+    lockTableWidthsForMinute()
     updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
   } catch (error) { tableError.value = error.message } finally { if (showLoading) loading.value = false }
+}
+function lockTableWidthsForMinute() {
+  if (tableWidthsLocked) return
+  nextTick(() => {
+    const table = tableRef.value
+    if (!table) return
+    const columns = table.querySelectorAll('col')
+    const headers = table.querySelectorAll('thead th')
+    if (!columns.length || columns.length !== headers.length) return
+    headers.forEach((header, index) => { columns[index].style.width = `${header.getBoundingClientRect().width}px` })
+    tableWidthsLocked = true
+    tableWidthUnlockTimer = setTimeout(() => {
+      columns.forEach((column) => { column.style.width = '' })
+      tableWidthsLocked = false
+      tableWidthUnlockTimer = null
+    }, 60000)
+  })
 }
 function connectPriceEvents() {
   priceEvents?.close()
@@ -214,7 +235,7 @@ function formatPercent(value) { return value === null || value === undefined ? '
 function numberClass(value) { return value > 0 ? 'positive' : value < 0 ? 'negative' : '' }
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
 onMounted(() => { if (authenticated.value) { loadPairs(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
-onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
+onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer); if (tableWidthUnlockTimer) clearTimeout(tableWidthUnlockTimer) })
 </script>
 
 <style>
@@ -227,17 +248,4 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .workspace { max-width: 1440px; margin: 0 auto; padding: 46px 22px; } .dashboard-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 34px; } .dashboard-heading h1 { margin: 8px 0 7px; font-size: clamp(26px,3vw,38px); line-height: 1; letter-spacing: 0; } .dashboard-heading > div > p:last-child, .add-pair-row span { margin: 0; color: #8f9d96; font-size: 13px; } .heading-metrics { display: flex; gap: 30px; } .heading-metrics div { min-width: 84px; border-left: 1px solid #3a4641; padding-left: 12px; } .heading-metrics span { display: block; color: #7f8d86; font: 10px 'IBM Plex Mono', monospace; letter-spacing: .7px; } .heading-metrics strong { display: block; margin-top: 4px; color: #e4eee9; font: 600 15px 'IBM Plex Mono', monospace; }
 .add-pair-row { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 19px 20px; margin-bottom: 18px; border: 1px solid #35423d; background: #19201e; } .section-label { margin-bottom: 7px; } .add-pair-form { display: flex; width: min(100%,700px); gap: 8px; align-items: end; } .pair-fields { display: flex; flex: 1; gap: 8px; } .pair-fields input { margin: 0; flex: 1; min-width: 0; } .pair-select { flex: 1; margin: 0; min-width: 0; } .pair-select input { margin-top: 7px; } .pair-hint { display: block; margin-top: 7px; color: #7f8d86; font-size: 11px; line-height: 1.4; text-transform: none; letter-spacing: 0; } .add-pair-form .primary-button { white-space: nowrap; } .table-section { border: 1px solid #35423d; background: #141a18; } .table-toolbar { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #35423d; color: #aeb9b3; font: 11px 'IBM Plex Mono', monospace; } .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font: 11px 'IBM Plex Mono', monospace; } th { padding: 13px 12px; color: #84948c; font-weight: 500; text-align: right; white-space: nowrap; background: #171e1b; } td { padding: 14px 12px; color: #dbe4df; text-align: right; white-space: nowrap; border-top: 1px solid #28322e; } th:first-child, th:nth-child(7), td:first-child, td:nth-child(7) { text-align: left; } tbody tr:hover { background: #1a2420; } .instrument { color: #f0f7f3; font-weight: 600; } .positive { color: #75dbb6; } .negative { color: #ff9989; } .editable-cell { cursor: text; outline: 1px dashed transparent; outline-offset: -4px; } .editable-cell:hover { outline-color: #587269; background: #18221e; } .editable-cell input { width: 100%; min-width: 72px; margin: -7px 0; border-color: #77d6b6; padding: 6px 7px; text-align: right; font: inherit; } .editable-cell.is-invalid { color: #ff9d8b; outline-color: #ff7567; background: rgba(158, 54, 44, .24); } .editable-cell.is-invalid input { border-color: #ff7567; } .empty-state { padding: 35px; color: #8f9d96; text-align: center !important; } .table-error { margin-bottom: 14px; }
 @media (max-width: 700px) { .topbar, .dashboard-heading, .add-pair-row { align-items: flex-start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: space-between; } .workspace { padding: 30px 14px; } .heading-metrics { width: 100%; } .add-pair-form { width: 100%; flex-direction: column; } .pair-fields { width: 100%; flex-direction: column; } .pair-select { width: 100%; } .add-pair-form .primary-button { width: 100%; } .login-panel { padding: 28px 23px; } }
-/* Keep live market values from changing the table geometry on every tick. */
-.table-wrap table { width: 100%; min-width: 1480px; table-layout: fixed; }
-.table-wrap .col-cme-name, .table-wrap .col-forts-name { width: 190px; }
-.table-wrap .col-date { width: 100px; }
-.table-wrap .col-price { width: 100px; }
-.table-wrap .col-margin { width: 120px; }
-.table-wrap .col-lot, .table-wrap .col-virt { width: 82px; }
-.table-wrap .col-ratio { width: 92px; }
-.table-wrap .col-dte { width: 58px; }
-.table-wrap .col-diff { width: 92px; }
-.table-wrap .col-percent { width: 94px; }
-.table-wrap .col-ytm { width: 128px; }
-.table-wrap td { overflow: hidden; text-overflow: ellipsis; }
 </style>
