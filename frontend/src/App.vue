@@ -89,8 +89,6 @@ const editorInput = ref(null)
 const invalidCells = ref({})
 let priceEvents = null
 let priceRefreshTimer = null
-let tableWidthUnlockTimer = null
-let tableWidthsLocked = false
 const tableRef = ref(null)
 
 function authHeaders() { return { Authorization: `Bearer ${token.value}` } }
@@ -114,25 +112,22 @@ async function loadPairs(showLoading = true) {
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || 'Не удалось получить данные')
     pairs.value = data.pairs
-    lockTableWidthsForMinute()
+    preserveTableColumnWidths()
     updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
   } catch (error) { tableError.value = error.message } finally { if (showLoading) loading.value = false }
 }
-function lockTableWidthsForMinute() {
-  if (tableWidthsLocked) return
+function preserveTableColumnWidths() {
   nextTick(() => {
     const table = tableRef.value
     if (!table) return
     const columns = table.querySelectorAll('col')
     const headers = table.querySelectorAll('thead th')
     if (!columns.length || columns.length !== headers.length) return
-    headers.forEach((header, index) => { columns[index].style.width = `${header.getBoundingClientRect().width}px` })
-    tableWidthsLocked = true
-    tableWidthUnlockTimer = setTimeout(() => {
-      columns.forEach((column) => { column.style.width = '' })
-      tableWidthsLocked = false
-      tableWidthUnlockTimer = null
-    }, 60000)
+    headers.forEach((header, index) => {
+      const currentWidth = parseFloat(columns[index].style.width) || 0
+      const measuredWidth = header.getBoundingClientRect().width
+      columns[index].style.width = `${Math.max(currentWidth, measuredWidth)}px`
+    })
   })
 }
 function connectPriceEvents() {
@@ -235,7 +230,7 @@ function formatPercent(value) { return value === null || value === undefined ? '
 function numberClass(value) { return value > 0 ? 'positive' : value < 0 ? 'negative' : '' }
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
 onMounted(() => { if (authenticated.value) { loadPairs(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
-onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer); if (tableWidthUnlockTimer) clearTimeout(tableWidthUnlockTimer) })
+onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
 </script>
 
 <style>
