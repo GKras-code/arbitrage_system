@@ -67,7 +67,7 @@ class PairCreateRequest(BaseModel):
 
 
 class PairManualValueUpdate(BaseModel):
-    field: Literal["virt_0", "cme_margin", "forts_margin_rub"]
+    field: Literal["virt_0", "price_ratio", "cme_margin", "forts_margin_rub"]
     value: Decimal
 
 
@@ -237,7 +237,7 @@ async def initialize_database() -> None:
                 cme_price NUMERIC(18, 4),
                 cme_margin NUMERIC(18, 2),
                 cme_lot NUMERIC(18, 4),
-                virt_0 NUMERIC(18, 4),
+                virt_0 NUMERIC(18, 4) NOT NULL DEFAULT 0,
                 forts_name VARCHAR(100),
                 forts_expiration DATE,
                 forts_price NUMERIC(18, 4),
@@ -256,6 +256,13 @@ async def initialize_database() -> None:
         await connection.execute(
             "ALTER TABLE arbitrage_pairs "
             "ADD COLUMN IF NOT EXISTS forts_margin_updated_at TIMESTAMPTZ"
+        )
+        await connection.execute(
+            "ALTER TABLE arbitrage_pairs "
+            "ALTER COLUMN virt_0 SET DEFAULT 0"
+        )
+        await connection.execute(
+            "UPDATE arbitrage_pairs SET virt_0 = 0 WHERE virt_0 IS NULL"
         )
         await connection.execute(
             """
@@ -424,7 +431,7 @@ async def _refresh_arbitrage_metrics() -> bool:
 
 
 async def _save_market_price(column: str, instrument: str, price: object) -> None:
-    """Store the latest price and recalculate the CME-to-FORTS price ratio."""
+    """Store the latest price and fill a missing CME-to-FORTS price ratio once."""
     if price is None or not instrument:
         return
     try:
@@ -436,15 +443,14 @@ async def _save_market_price(column: str, instrument: str, price: object) -> Non
     async with pool.acquire() as connection:
         updated = await connection.fetch(
             f"UPDATE arbitrage_pairs SET {column} = $1::numeric, "
-            "price_ratio = ROUND("
-            "CASE WHEN COALESCE("
+            "price_ratio = CASE WHEN price_ratio IS NULL AND COALESCE("
             f"{'$1::numeric' if column == 'cme_price' else 'cme_price'}, 0::numeric) <> 0::numeric "
             "AND COALESCE("
             f"{'$1::numeric' if column == 'forts_price' else 'forts_price'}, 0::numeric) <> 0::numeric "
-            "THEN "
+            "THEN ROUND("
             f"{'$1::numeric' if column == 'cme_price' else 'cme_price'} / "
-            f"{'$1::numeric' if column == 'forts_price' else 'forts_price'} "
-            "ELSE NULL END, 1) WHERE "
+            f"{'$1::numeric' if column == 'forts_price' else 'forts_price'}, 0) "
+            "ELSE price_ratio END WHERE "
             f"{'cme_name' if column == 'cme_price' else 'forts_name'} = $2 RETURNING id",
             value,
             instrument,
