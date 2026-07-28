@@ -493,11 +493,22 @@ async def _restart_market_subscriptions() -> None:
         forts_tickers = await connection.fetch("SELECT DISTINCT forts_name FROM arbitrage_pairs WHERE COALESCE(forts_name, '') <> ''")
 
     _market_data_tasks = []
-    if cme_symbols and (os.getenv("EXANTE_JWT") or os.getenv("EXANTE_SECRET_KEY")):
-        _market_data_tasks.append(asyncio.create_task(
-            _stream_exante_prices([row["cme_name"] for row in cme_symbols]),
-            name="exante-price-stream",
-        ))
+    exante_auth_configured = (
+        os.getenv("EXANTE_JWT")
+        or os.getenv("EXANTE_SECRET_KEY")
+        or (
+            os.getenv("EXANTE_CLIENT_ID")
+            and os.getenv("EXANTE_APPLICATION_ID")
+            and os.getenv("EXANTE_SHARED_KEY")
+        )
+    )
+    if cme_symbols and exante_auth_configured:
+        for row in cme_symbols:
+            symbol_id = str(row["cme_name"])
+            _market_data_tasks.append(asyncio.create_task(
+                _stream_exante_prices([symbol_id]),
+                name=f"exante-price-stream:{symbol_id}",
+            ))
     if forts_tickers and os.getenv("BCS_REFRESH_TOKEN"):
         instruments = [
             {"ticker": row["forts_name"], "classCode": BCS_FUTURES_CLASS_CODE}

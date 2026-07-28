@@ -247,6 +247,17 @@ class EXANTEConnector:
                 logger.warning("EXANTE: нет компонентов для перегенерации JWT")
         return self._jwt_token or ""
 
+    async def refresh_token(self) -> str:
+        """Принудительно перевыпустить JWT после ответа 401."""
+        if not (self._client_id and self._application_id and self._shared_key):
+            return self._jwt_token or ""
+        self._jwt_token = _generate_jwt(
+            self._client_id, self._application_id, self._shared_key
+        )
+        self._decode_jwt_expiry()
+        logger.info("EXANTE JWT принудительно обновлён после 401")
+        return self._jwt_token
+
     # ------------------------------------------------------------------
     # Построение заголовков аутентификации
     # ------------------------------------------------------------------
@@ -766,10 +777,6 @@ class EXANTEConnector:
             on_trade = lambda trade: logger.info("EXANTE trade: %s", trade)
 
         await self.ensure_token()
-        headers = {
-            "Accept": "application/x-json-stream",
-            **self._build_auth_headers(),
-        }
 
         buffer: list[dict] = []
         stream_session: aiohttp.ClientSession | None = None
@@ -790,9 +797,22 @@ class EXANTEConnector:
                     timeout=timeout, connector=tcp_connector
                 )
 
+                headers = {
+                    "Accept": "application/x-json-stream",
+                    **self._build_auth_headers(),
+                }
                 async with stream_session.get(
                     url, headers=headers,
                 ) as response:
+                        if response.status == 401:
+                            await self.refresh_token()
+                            raise aiohttp.ClientResponseError(
+                                response.request_info,
+                                response.history,
+                                status=response.status,
+                                message=response.reason,
+                                headers=response.headers,
+                            )
                         response.raise_for_status()
                         logger.info(
                             "EXANTE trades stream connected: %s", url
