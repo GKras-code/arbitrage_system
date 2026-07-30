@@ -17,8 +17,6 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     short_name TEXT,
     instrument_type TEXT NOT NULL,
     minimum_step NUMERIC,
-    step_price NUMERIC,
-    step_price_currency TEXT,
     maturity_date DATE,
     lot_size NUMERIC,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -31,12 +29,10 @@ INSERT INTO {TABLE_NAME} (
     short_name,
     instrument_type,
     minimum_step,
-    step_price,
-    step_price_currency,
     maturity_date,
     lot_size
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6)
 """
 
 
@@ -74,8 +70,6 @@ def _to_row(instrument: dict[str, Any]) -> tuple[Any, ...] | None:
         str(instrument.get("shortName") or "").strip() or None,
         str(instrument.get("instrumentType") or instrument.get("type") or "").strip(),
         _decimal(instrument.get("minimumStep")),
-        _decimal(instrument.get("stepPrice")),
-        str(instrument.get("currencyStepPrice") or "").strip() or None,
         _date(instrument.get("maturityDate")),
         _decimal(instrument.get("lotSize")),
     )

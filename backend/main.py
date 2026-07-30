@@ -41,7 +41,7 @@ from connectors.exante_connector import EXANTEConnector
 from db import create_pool
 from sync_bcs_market_data import sync_market_data as sync_bcs_market_data
 from sync_exante_market_data import sync_market_data as sync_exante_market_data
-from sync_forts_margin import sync_forts_margins
+from sync_forts_margin import sync_forts_market_parameters
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-jwt-secret-before-production")
 PASSWORD_SALT = b"arbitrage-system-user-v1"
@@ -650,11 +650,11 @@ async def _stop_reference_data_sync() -> None:
 
 
 async def _sync_forts_margins_periodically() -> None:
-    """Обновлять ГО FORTS сразу после запуска и затем каждые три часа."""
+    """Обновлять ГО и стоимость шага FORTS сразу после запуска и каждые три часа."""
     while True:
         try:
-            updated = await sync_forts_margins()
-            print(f"ГО FORTS обновлено: {updated} тикеров.", flush=True)
+            updated = await sync_forts_market_parameters()
+            print(f"Параметры FORTS обновлены: {updated} тикеров.", flush=True)
             if updated:
                 await _refresh_arbitrage_metrics()
                 await _publish_price_update()
@@ -879,33 +879,30 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
                     SELECT minimum_step FROM bcs_market_data
                     WHERE ticker = arbitrage_pairs.forts_name
                 ),
-                forts_price_step_value = (
-                    SELECT step_price FROM bcs_market_data
-                    WHERE ticker = arbitrage_pairs.forts_name
-                )
+                forts_price_step_value = NULL
             FROM exante_market_data ex
             WHERE arbitrage_pairs.id = $1
               AND ex.symbol_id = arbitrage_pairs.cme_name
             """,
             row["id"],
         )
-        # Перечитать обновлённую запись
-        row = await connection.fetchrow(
-                 """
-                 SELECT id, cme_name, cme_data_exp, forts_name, forts_data_exp, cme_lot,
-                     forts_price_step, forts_price_step_value
-                 FROM arbitrage_pairs
-                 WHERE id = $1
-                 """,
-            row["id"],
-        )
     await _restart_market_subscriptions()
     if bcs_ticker:
         try:
-            await sync_forts_margins([bcs_ticker])
+            await sync_forts_market_parameters([bcs_ticker])
             await _refresh_arbitrage_metrics()
         except Exception as error:
-            print(f"Ошибка первичной загрузки ГО FORTS для {bcs_ticker}: {error}", flush=True)
+            print(f"Ошибка первичной загрузки параметров FORTS для {bcs_ticker}: {error}", flush=True)
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            """
+            SELECT id, cme_name, cme_data_exp, forts_name, forts_data_exp, cme_lot,
+                   forts_price_step, forts_price_step_value
+            FROM arbitrage_pairs
+            WHERE id = $1
+            """,
+            row["id"],
+        )
     return dict(row)
 
 

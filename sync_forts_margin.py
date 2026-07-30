@@ -18,8 +18,8 @@ REQUEST_TIMEOUT_SECONDS = 15
 MAX_CONCURRENT_REQUESTS = 10
 
 
-def _initial_margin(payload: dict) -> Decimal | None:
-    """Извлечь INITIALMARGIN из ответа ISS в табличном формате."""
+def _security_decimal(payload: dict, column_name: str) -> Decimal | None:
+    """Извлечь числовой параметр из ответа ISS в табличном формате."""
     securities = payload.get("securities")
     if not isinstance(securities, dict):
         return None
@@ -28,15 +28,18 @@ def _initial_margin(payload: dict) -> Decimal | None:
     if not isinstance(columns, list) or not isinstance(rows, list) or not rows:
         return None
     try:
-        margin_index = columns.index("INITIALMARGIN")
-        value = rows[0][margin_index]
-        margin = Decimal(str(value))
+        value = rows[0][columns.index(column_name)]
+        result = Decimal(str(value).replace(",", "."))
     except (IndexError, InvalidOperation, ValueError):
         return None
-    return margin if margin.is_finite() and margin >= 0 else None
+    return result if result.is_finite() and result >= 0 else None
 
 
-async def _fetch_initial_margin(session: aiohttp.ClientSession, ticker: str) -> Decimal | None:
+async def _fetch_market_parameters(
+    session: aiohttp.ClientSession,
+    ticker: str,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Получить ГО и стоимость шага цены из одной карточки ISS."""
     url = ISS_SECURITY_URL.format(ticker=quote(ticker, safe=""))
     async with session.get(
         url,
@@ -44,11 +47,14 @@ async def _fetch_initial_margin(session: aiohttp.ClientSession, ticker: str) -> 
     ) as response:
         response.raise_for_status()
         payload = await response.json(content_type=None)
-    return _initial_margin(payload)
+    return (
+        _security_decimal(payload, "INITIALMARGIN"),
+        _security_decimal(payload, "STEPPRICE"),
+    )
 
 
-async def sync_forts_margins(tickers: Iterable[str] | None = None) -> int:
-    """Сохранить актуальное ГО покупки для заданных FORTS-тикеров."""
+async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> int:
+    """Сохранить актуальные ГО и стоимость шага цены FORTS из MOEX ISS."""
     pool = await create_pool()
     if tickers is None:
         async with pool.acquire() as connection:
@@ -67,11 +73,11 @@ async def sync_forts_margins(tickers: Iterable[str] | None = None) -> int:
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
     ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-    async def fetch(ticker: str) -> tuple[Decimal, str] | None:
+    async def fetch(ticker: str) -> tuple[Decimal | None, Decimal | None, str] | None:
         try:
             async with semaphore:
-                margin = await _fetch_initial_margin(session, ticker)
-            return (margin, ticker) if margin is not None else None
+                margin, step_price = await _fetch_market_parameters(session, ticker)
+            return (margin, step_price, ticker) if margin is not None or step_price is not None else None
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             return None
 
@@ -86,8 +92,14 @@ async def sync_forts_margins(tickers: Iterable[str] | None = None) -> int:
     async with pool.acquire() as connection:
         await connection.executemany(
             "UPDATE arbitrage_pairs "
-            "SET forts_margin_rub = $1 "
-            "WHERE forts_name = $2",
+            "SET forts_margin_rub = COALESCE($1, forts_margin_rub), "
+            "forts_price_step_value = COALESCE($2, forts_price_step_value) "
+            "WHERE forts_name = $3",
             updates,
         )
     return len(updates)
+
+
+async def sync_forts_margins(tickers: Iterable[str] | None = None) -> int:
+    """Совместимое имя синхронизации параметров FORTS."""
+    return await sync_forts_market_parameters(tickers)
