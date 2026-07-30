@@ -53,8 +53,8 @@
         </section>
         <section class="table-section">
           <div class="table-toolbar"><span><i></i> CME / FORTS</span><div class="table-toolbar-actions"><span>{{ pairs.length }} инструмент{{ pairEnding }}</span><button class="details-toggle" type="button" :aria-expanded="showContractDetails" @click="showContractDetails = !showContractDetails">{{ showContractDetails ? 'Скрыть параметры' : 'Параметры контрактов' }}</button></div></div>
-          <div class="table-wrap"><table :class="{ 'is-compact': !showContractDetails }"><colgroup v-if="!showContractDetails"><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="ratio-column" /><col class="dte-column" /><col class="virt-column" /><col class="diff-column" /><col class="percent-column" /><col class="ytm-column" /></colgroup><thead><tr>
-            <th><span class="header-label">CME<br>name</span></th><th><span class="header-label">CME<br>exp</span></th><th><span class="header-label">CME<br>price</span></th><th v-if="showContractDetails"><span class="header-label">CME margin,<br>USD</span></th><th v-if="showContractDetails"><span class="header-label">CME<br>lot</span></th><th><span class="header-label">FORTS<br>name</span></th><th><span class="header-label">FORTS<br>exp</span></th><th><span class="header-label">FORTS<br>price</span></th><th><span class="header-label">Price<br>ratio</span></th><th v-if="showContractDetails"><span class="header-label">FORTS margin,<br>RUB</span></th><th v-if="showContractDetails"><span class="header-label">Price<br>step</span></th><th v-if="showContractDetails"><span class="header-label">Step<br>value</span></th><th v-if="showContractDetails"><span class="header-label">Trade<br>lot</span></th><th>DTE</th><th>Virt_0</th><th>Diff</th><th><span class="header-label">Diff,<br>%</span></th><th><span class="header-label">Diff,<br>YTM</span></th>
+          <div class="table-wrap"><table :class="{ 'is-compact': !showContractDetails }"><colgroup v-if="!showContractDetails"><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="ratio-column" /><col class="dte-column" /><col class="virt-column" /><col class="diff-column" /><col class="percent-column" /><col class="ytm-column" /><col class="action-column" /></colgroup><thead><tr>
+            <th><span class="header-label">CME<br>name</span></th><th><span class="header-label">CME<br>exp</span></th><th><span class="header-label">CME<br>price</span></th><th v-if="showContractDetails"><span class="header-label">CME margin,<br>USD</span></th><th v-if="showContractDetails"><span class="header-label">CME<br>lot</span></th><th><span class="header-label">FORTS<br>name</span></th><th><span class="header-label">FORTS<br>exp</span></th><th><span class="header-label">FORTS<br>price</span></th><th><span class="header-label">Price<br>ratio</span></th><th v-if="showContractDetails"><span class="header-label">FORTS margin,<br>RUB</span></th><th v-if="showContractDetails"><span class="header-label">Price<br>step</span></th><th v-if="showContractDetails"><span class="header-label">Step<br>value</span></th><th v-if="showContractDetails"><span class="header-label">Trade<br>lot</span></th><th>DTE</th><th>Virt_0</th><th>Diff</th><th><span class="header-label">Diff,<br>%</span></th><th><span class="header-label">Diff,<br>YTM</span></th><th aria-label="Действия"></th>
           </tr></thead><tbody>
             <tr v-if="loading"><td :colspan="visibleColumnCount" class="empty-state">Загрузка данных...</td></tr>
             <tr v-else-if="!pairs.length"><td :colspan="visibleColumnCount" class="empty-state">Арбитражных пар пока нет.</td></tr>
@@ -77,6 +77,7 @@
               <td :class="numberClass(pair.diff)">{{ formatNumber(pair.diff) }}</td>
               <td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td>
               <td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td>
+              <td class="pair-action"><button class="delete-pair-button" type="button" :disabled="deletingPairId === pair.id" :title="`Удалить ${pair.cme_name} / ${pair.forts_name || 'FORTS'}`" :aria-label="`Удалить пару ${pair.cme_name} / ${pair.forts_name || 'FORTS'}`" @click.stop="deletePair(pair)">×</button></td>
             </tr>
           </tbody></table></div>
         </section>
@@ -111,6 +112,7 @@ const editingCell = ref(null)
 const editorInput = ref(null)
 const invalidCells = ref({})
 const showContractDetails = ref(false)
+const deletingPairId = ref(null)
 let priceEvents = null
 let priceRefreshTimer = null
 
@@ -165,6 +167,26 @@ async function addPair() {
     if (!response.ok) throw new Error(data.detail || 'Не удалось добавить пару')
     newCmeName.value = ''; newFortsName.value = ''; await loadPairs()
   } catch (error) { tableError.value = error.message } finally { addingPair.value = false }
+}
+async function deletePair(pair) {
+  const pairLabel = `${pair.cme_name} / ${pair.forts_name || 'FORTS'}`
+  if (!window.confirm(`Удалить пару ${pairLabel}?`)) return
+  deletingPairId.value = pair.id
+  tableError.value = ''
+  try {
+    const response = await fetch(`/api/arbitrage-pairs/${pair.id}`, { method: 'DELETE', headers: authHeaders() })
+    if (response.status === 401) return logout()
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.detail || 'Не удалось удалить пару')
+    }
+    pairs.value = pairs.value.filter(item => item.id !== pair.id)
+    if (editingCell.value?.pairId === pair.id) editingCell.value = null
+  } catch (error) {
+    tableError.value = error.message || 'Не удалось удалить пару'
+  } finally {
+    deletingPairId.value = null
+  }
 }
 function cellKey(pairId, field) { return `${pairId}:${field}` }
 function isEditingCell(pairId, field) { return editingCell.value?.pairId === pairId && editingCell.value?.field === field }
@@ -250,7 +272,7 @@ function formatPercent(value) { return value === null || value === undefined ? '
 function numberClass(value) { return value > 0 ? 'positive' : value < 0 ? 'negative' : '' }
 const currencyRateDate = computed(() => currencyRates.value[0]?.rate_date ? formatDate(currencyRates.value[0].rate_date) : '—')
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
-const visibleColumnCount = computed(() => showContractDetails.value ? 18 : 12)
+const visibleColumnCount = computed(() => showContractDetails.value ? 19 : 13)
 onMounted(() => { if (authenticated.value) { loadPairs(); loadCurrencyRates(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
 onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
 </script>
@@ -265,6 +287,6 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .workspace { max-width: 1440px; margin: 0 auto; padding: 46px 22px; } .dashboard-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 34px; } .dashboard-heading h1 { margin: 8px 0 7px; font-size: clamp(26px,3vw,38px); line-height: 1; letter-spacing: 0; } .dashboard-heading > div > p:last-child, .add-pair-row span { margin: 0; color: #8f9d96; font-size: 13px; } .heading-metrics { display: flex; gap: 30px; } .heading-metrics div { min-width: 84px; border-left: 1px solid #3a4641; padding-left: 12px; } .heading-metrics span { display: block; color: #7f8d86; font: 10px 'IBM Plex Mono', monospace; letter-spacing: .7px; } .heading-metrics strong { display: block; margin-top: 4px; color: #e4eee9; font: 600 15px 'IBM Plex Mono', monospace; }
 .add-pair-row { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 19px 20px; margin-bottom: 18px; border: 1px solid #35423d; background: #19201e; } .section-label { margin-bottom: 7px; } .add-pair-form { display: flex; width: min(100%,700px); gap: 8px; align-items: end; } .pair-fields { display: flex; flex: 1; gap: 8px; } .pair-fields input { margin: 0; flex: 1; min-width: 0; } .pair-select { flex: 1; margin: 0; min-width: 0; } .pair-select input { margin-top: 7px; } .pair-hint { display: block; margin-top: 7px; color: #7f8d86; font-size: 11px; line-height: 1.4; text-transform: none; letter-spacing: 0; } .add-pair-form .primary-button { white-space: nowrap; } .table-section { border: 1px solid #35423d; background: #141a18; } .table-toolbar { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #35423d; color: #aeb9b3; font: 11px 'IBM Plex Mono', monospace; } .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font: 11px 'IBM Plex Mono', monospace; } th { padding: 13px 12px; color: #84948c; font-weight: 500; text-align: right; white-space: nowrap; background: #171e1b; } td { padding: 14px 12px; color: #dbe4df; text-align: right; white-space: nowrap; border-top: 1px solid #28322e; } th:first-child, th:nth-child(7), td:first-child, td:nth-child(7) { text-align: left; } tbody tr:hover { background: #1a2420; } .instrument { color: #f0f7f3; font-weight: 600; } .positive { color: #75dbb6; } .negative { color: #ff9989; } .editable-cell { cursor: text; outline: 1px dashed transparent; outline-offset: -4px; } .editable-cell:hover { outline-color: #587269; background: #18221e; } .editable-cell input { width: 100%; min-width: 72px; margin: -7px 0; border-color: #77d6b6; padding: 6px 7px; text-align: right; font: inherit; } .editable-cell.is-invalid { color: #ff9d8b; outline-color: #ff7567; background: rgba(158, 54, 44, .24); } .editable-cell.is-invalid input { border-color: #ff7567; } .empty-state { padding: 35px; color: #8f9d96; text-align: center !important; } .table-error { margin-bottom: 14px; }
 .currency-rates { display: flex; align-items: stretch; margin-bottom: 18px; border: 1px solid #35423d; background: #161d1a; font: 11px 'IBM Plex Mono', monospace; } .currency-rates-title, .currency-rate { display: flex; flex-direction: column; justify-content: center; padding: 12px 16px; border-right: 1px solid #35423d; } .currency-rates-title { min-width: 215px; color: #77d6b6; letter-spacing: .6px; } .currency-rates-title small, .currency-rates-empty { margin-top: 4px; color: #7f8d86; font-size: 10px; letter-spacing: 0; } .currency-rate { min-width: 150px; gap: 4px; } .currency-rate strong { color: #aeb9b3; font-weight: 500; } .currency-rate span { color: #e4eee9; font-size: 13px; font-weight: 600; } .currency-rates-empty { align-self: center; margin: 0; padding: 0 16px; }
-.table-toolbar { align-items: center; gap: 12px; padding: 10px 12px; } .table-toolbar-actions { display: flex; align-items: center; gap: 12px; } .details-toggle { border: 1px solid #46574f; border-radius: 2px; padding: 6px 8px; color: #b9c7c0; background: #19211e; font: 10px 'IBM Plex Mono', monospace; } .details-toggle:hover { border-color: #77d6b6; color: #e7f4ed; } th, td { text-align: center !important; } th { padding: 9px 8px; line-height: 1.25; } .header-label { display: inline-block; } table.is-compact { min-width: 920px; table-layout: fixed; } .contract-column { width: 14%; } .date-column { width: 9%; } .price-column, .ratio-column { width: 8%; } .dte-column, .percent-column { width: 5%; } .virt-column, .diff-column { width: 7%; } .ytm-column { width: 6%; } td { max-width: 132px; padding: 10px 8px; } .instrument { display: block; max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; } .editable-cell input { min-width: 64px; margin: -5px 0; padding: 5px 6px; }
+.table-toolbar { align-items: center; gap: 12px; padding: 10px 12px; } .table-toolbar-actions { display: flex; align-items: center; gap: 12px; } .details-toggle { border: 1px solid #46574f; border-radius: 2px; padding: 6px 8px; color: #b9c7c0; background: #19211e; font: 10px 'IBM Plex Mono', monospace; } .details-toggle:hover { border-color: #77d6b6; color: #e7f4ed; } th, td { text-align: center !important; } th { padding: 9px 8px; line-height: 1.25; } .header-label { display: inline-block; } table.is-compact { min-width: 920px; table-layout: fixed; } .contract-column { width: 14%; } .date-column { width: 9%; } .price-column, .ratio-column { width: 8%; } .dte-column, .percent-column { width: 5%; } .virt-column, .diff-column { width: 7%; } .ytm-column { width: 6%; } .action-column { width: 4%; } td { max-width: 132px; padding: 10px 8px; } .instrument { display: block; max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; } .editable-cell input { min-width: 64px; margin: -5px 0; padding: 5px 6px; } .pair-action { padding: 0 4px; } .delete-pair-button { width: 24px; height: 24px; border: 1px solid transparent; border-radius: 2px; padding: 0; color: #87958e; background: transparent; font: 500 18px/1 'IBM Plex Mono', monospace; } .delete-pair-button:hover:not(:disabled) { border-color: #a85850; color: #ff9989; background: rgba(158, 54, 44, .18); } .delete-pair-button:disabled { cursor: wait; opacity: .45; }
 @media (max-width: 700px) { .topbar, .dashboard-heading, .add-pair-row { align-items: flex-start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: space-between; } .workspace { padding: 30px 14px; } .heading-metrics { width: 100%; } .add-pair-form { width: 100%; flex-direction: column; } .pair-fields { width: 100%; flex-direction: column; } .pair-select { width: 100%; } .add-pair-form .primary-button { width: 100%; } .currency-rates { flex-wrap: wrap; } .currency-rates-title { width: 100%; min-width: 0; border-bottom: 1px solid #35423d; } .currency-rate { flex: 1; min-width: 0; } .currency-rate:last-of-type { border-right: 0; } .login-panel { padding: 28px 23px; } }
 </style>

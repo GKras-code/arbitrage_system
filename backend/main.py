@@ -870,7 +870,7 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
             UPDATE arbitrage_pairs
             SET
                 cme_data_exp = ex.maturity_date,
-                cme_lot = ex.lot_size,
+                cme_lot = ex.contract_multiplier,
                 forts_data_exp = (
                     SELECT maturity_date FROM bcs_market_data
                     WHERE ticker = arbitrage_pairs.forts_name
@@ -907,6 +907,24 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
         except Exception as error:
             print(f"Ошибка первичной загрузки ГО FORTS для {bcs_ticker}: {error}", flush=True)
     return dict(row)
+
+
+@app.delete("/api/arbitrage-pairs/{pair_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_arbitrage_pair(
+    pair_id: int,
+    _: str = Depends(get_current_user),
+):
+    """Удалить арбитражную пару и обновить подписки на котировки."""
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        deleted = await connection.fetchval(
+            "DELETE FROM arbitrage_pairs WHERE id = $1 RETURNING id",
+            pair_id,
+        )
+    if deleted is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пара не найдена")
+    await _restart_market_subscriptions()
+    await _publish_price_update()
 
 
 @app.patch("/api/arbitrage-pairs/{pair_id}/manual-value")
