@@ -291,7 +291,7 @@ function scheduleInstrumentSearch(provider, query) {
 function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
 function formatDate(value) { return value ? new Intl.DateTimeFormat('ru-RU').format(new Date(`${value}T00:00:00`)) : '—' }
 function formatNumber(value, maximumFractionDigits = 2) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits }).format(value) }
-function formatPercent(value) { return value === null || value === undefined ? '—' : `${formatNumber(value)}%` }
+function formatPercent(value) { return value === null || value === undefined ? '—' : `${formatNumber(value * 100)}%` }
 function numberClass(value) { return value > 0 ? 'positive' : value < 0 ? 'negative' : '' }
 const currencyRateDate = computed(() => currencyRates.value[0]?.rate_date ? formatDate(currencyRates.value[0].rate_date) : '—')
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
