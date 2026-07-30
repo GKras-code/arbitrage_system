@@ -50,9 +50,11 @@ REFERENCE_CACHE_TTL_SECONDS = 15 * 60
 REFERENCE_SYNC_HOUR_UTC = 3
 FORTS_MARGIN_SYNC_INTERVAL_SECONDS = 3 * 60 * 60
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
-CBR_RATE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 CBR_DAILY_RATES_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
 CBR_CURRENCIES = {"USD", "CNY"}
+MOSCOW_TIMEZONE = timezone(timedelta(hours=3), "MSK")
+CBR_RATE_SYNC_HOUR_MSK = 3
+CBR_RATE_SYNC_MINUTE_MSK = 1
 
 _instrument_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 _market_data_tasks: list[asyncio.Task] = []
@@ -443,26 +445,8 @@ async def _refresh_cbr_rates() -> list[dict[str, object]]:
     return [dict(row) for row in rows]
 
 
-async def _currency_rates_are_stale() -> bool:
-    pool = await create_pool()
-    async with pool.acquire() as connection:
-        updated_at = await connection.fetchval(
-            "SELECT MIN(updated_at) FROM currency_rates WHERE currency_code = ANY($1::varchar[])",
-            list(CBR_CURRENCIES),
-        )
-    return updated_at is None or datetime.now(timezone.utc) - updated_at >= timedelta(
-        seconds=CBR_RATE_SYNC_INTERVAL_SECONDS
-    )
-
-
 async def _get_cbr_rates() -> list[dict[str, object]]:
-    """Вернуть сохраненные курсы и обновить их, когда истёк шестичасовой интервал."""
-    if await _currency_rates_are_stale():
-        try:
-            return await _refresh_cbr_rates()
-        except (aiohttp.ClientError, asyncio.TimeoutError, ET.ParseError, ValueError):
-            pass
-
+    """Вернуть последние сохранённые курсы без внепланового обновления."""
     pool = await create_pool()
     async with pool.acquire() as connection:
         rows = await connection.fetch(
@@ -638,6 +622,20 @@ def _seconds_until_reference_sync() -> float:
     return (scheduled - now).total_seconds()
 
 
+def _seconds_until_cbr_rate_sync() -> float:
+    """Рассчитать задержку до ближайшего обновления в 03:01 по Москве."""
+    now = datetime.now(MOSCOW_TIMEZONE)
+    scheduled = now.replace(
+        hour=CBR_RATE_SYNC_HOUR_MSK,
+        minute=CBR_RATE_SYNC_MINUTE_MSK,
+        second=0,
+        microsecond=0,
+    )
+    if scheduled <= now:
+        scheduled += timedelta(days=1)
+    return (scheduled - now).total_seconds()
+
+
 async def _sync_reference_data_periodically() -> None:
     """Обновлять справочники BCS и EXANTE каждый день в 03:00 UTC."""
     while True:
@@ -692,8 +690,9 @@ async def _stop_forts_margin_sync() -> None:
 
 
 async def _sync_cbr_rates_periodically() -> None:
-    """Обновлять сохраненные официальные курсы ЦБ РФ каждые шесть часов."""
+    """Обновлять сохранённые официальные курсы ЦБ РФ раз в сутки в 03:01 МСК."""
     while True:
+        await asyncio.sleep(_seconds_until_cbr_rate_sync())
         try:
             rates = await _refresh_cbr_rates()
             print(f"Курсы ЦБ РФ обновлены: {len(rates)} валют.", flush=True)
@@ -701,7 +700,6 @@ async def _sync_cbr_rates_periodically() -> None:
             raise
         except Exception as error:
             print(f"Ошибка обновления курсов ЦБ РФ: {error}", flush=True)
-        await asyncio.sleep(CBR_RATE_SYNC_INTERVAL_SECONDS)
 
 
 async def _stop_cbr_rate_sync() -> None:
@@ -733,7 +731,7 @@ async def lifespan(_: FastAPI):
     global _reference_sync_task, _forts_margin_sync_task, _cbr_rate_sync_task
     await initialize_database()
     await _restart_market_subscriptions()
-    # Планировщик стартует вместе с API и сам ждёт ближайшие 03:00 UTC.
+    # Планировщики стартуют вместе с API и ждут ближайшего времени запуска.
     _reference_sync_task = asyncio.create_task(
         _sync_reference_data_periodically(), name="reference-data-sync"
     )

@@ -61,12 +61,12 @@
             <tr v-for="pair in sortedPairs" :key="pair.id">
               <td class="instrument" :title="pair.cme_name">{{ pair.cme_name }}</td>
               <td>{{ formatDate(pair.cme_data_exp) }}</td>
-              <td>{{ formatNumber(pair.cme_price) }}</td>
+              <td>{{ formatExactNumber(pair.cme_price) }}</td>
               <td v-if="showContractDetails" class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'cme_margin_usd') }" @click="startCellEdit(pair, 'cme_margin_usd')"><input v-if="isEditingCell(pair.id, 'cme_margin_usd')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.cme_margin_usd, 0) }}</span></td>
               <td v-if="showContractDetails">{{ formatNumber(pair.cme_lot) }}</td>
               <td class="instrument" :title="pair.forts_name || 'Ожидает настройки'">{{ pair.forts_name || 'Ожидает настройки' }}</td>
               <td>{{ formatDate(pair.forts_data_exp) }}</td>
-              <td>{{ formatNumber(pair.forts_price) }}</td>
+              <td>{{ formatExactNumber(pair.forts_price) }}</td>
               <td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'price_ratio') }" @click="startCellEdit(pair, 'price_ratio')"><input v-if="isEditingCell(pair.id, 'price_ratio')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.price_ratio) }}</span></td>
               <td v-if="showContractDetails">{{ formatNumber(pair.forts_margin_rub, 0) }}</td>
               <td v-if="showContractDetails">{{ formatNumber(pair.forts_price_step, 8) }}</td>
@@ -75,7 +75,7 @@
               <td v-if="showContractDetails"><select class="trade-lot-currency" :value="pair.trade_lot_currency" :disabled="updatingCurrencyPairId === pair.id" :aria-label="`Валюта расчёта Trade lot для ${pair.cme_name}`" @change="updateTradeLotCurrency(pair, $event.target.value)"><option value="USD">USD</option><option value="CNY">CNY</option></select></td>
               <td>{{ pair.dte ?? '—' }}</td>
               <td class="editable-cell" :class="[numberClass(pair.virt_0), { 'is-invalid': isInvalidCell(pair.id, 'virt_0') }]" @click="startCellEdit(pair, 'virt_0')"><input v-if="isEditingCell(pair.id, 'virt_0')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.virt_0) }}</span></td>
-              <td :class="numberClass(pair.diff)">{{ formatNumber(pair.diff) }}</td>
+              <td :class="numberClass(pair.diff)">{{ formatExactNumber(pair.diff) }}</td>
               <td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td>
               <td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td>
               <td class="pair-action"><button class="delete-pair-button" type="button" :disabled="deletingPairId === pair.id" :title="`Удалить ${pair.cme_name} / ${pair.forts_name || 'FORTS'}`" :aria-label="`Удалить пару ${pair.cme_name} / ${pair.forts_name || 'FORTS'}`" @click.stop="deletePair(pair)">×</button></td>
@@ -293,6 +293,7 @@ function scheduleInstrumentSearch(provider, query) {
 function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
 function formatDate(value) { return value ? new Intl.DateTimeFormat('ru-RU').format(new Date(`${value}T00:00:00`)) : '—' }
 function formatNumber(value, maximumFractionDigits = 2) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits }).format(value) }
+function formatExactNumber(value) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 20 }).format(value) }
 function formatPercent(value) { return value === null || value === undefined ? '—' : `${formatNumber(value * 100)}%` }
 function numberClass(value) { return value > 0 ? 'positive' : value < 0 ? 'negative' : '' }
 function sortPairs(column) {
