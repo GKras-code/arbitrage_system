@@ -86,7 +86,7 @@ async def sync_forts_margins(tickers: Iterable[str] | None = None) -> int:
     async with pool.acquire() as connection:
         await connection.executemany(
             "UPDATE arbitrage_pairs "
-            "SET forts_margin_rub = $1, forts_margin_updated_at = NOW() "
+            "SET forts_margin_rub = $1 "
             "WHERE forts_name = $2",
             updates,
         )

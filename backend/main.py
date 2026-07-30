@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
+import ssl
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -19,6 +21,8 @@ from time import monotonic
 from typing import Literal
 
 import jwt
+import aiohttp
+import certifi
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -46,14 +50,22 @@ REFERENCE_CACHE_TTL_SECONDS = 15 * 60
 REFERENCE_SYNC_HOUR_UTC = 3
 FORTS_MARGIN_SYNC_INTERVAL_SECONDS = 3 * 60 * 60
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
-USD_RATE_CACHE_TTL_SECONDS = 600
+CBR_RATE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
+CBR_DAILY_RATES_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
+CBR_CURRENCIES = {"USD", "CNY"}
 
 _instrument_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 _market_data_tasks: list[asyncio.Task] = []
 _reference_sync_task: asyncio.Task | None = None
 _forts_margin_sync_task: asyncio.Task | None = None
+_cbr_rate_sync_task: asyncio.Task | None = None
 _price_update_subscribers: set[asyncio.Queue[None]] = set()
-_usd_rate_cache: tuple[float, Decimal] | None = None
+ARBITRAGE_PAIR_COLUMNS = {
+    "id", "cme_name", "cme_data_exp", "cme_price", "cme_margin_usd", "cme_lot",
+    "forts_name", "forts_data_exp", "forts_price", "price_ratio", "forts_margin_rub",
+    "forts_price_step", "forts_price_step_value", "forts_trade_lot", "dte", "virt_0",
+    "diff", "diff_percent", "diff_ytm_margin",
+}
 
 
 class LoginRequest(BaseModel):
@@ -67,7 +79,7 @@ class PairCreateRequest(BaseModel):
 
 
 class PairManualValueUpdate(BaseModel):
-    field: Literal["virt_0", "price_ratio", "cme_margin", "forts_margin_rub"]
+    field: Literal["virt_0", "price_ratio", "cme_margin_usd"]
     value: Decimal
 
 
@@ -221,6 +233,18 @@ async def _search_bcs_options(query: str, limit: int) -> list[dict[str, str]]:
 async def initialize_database() -> None:
     pool = await create_pool()
     async with pool.acquire() as connection:
+        existing_columns = {
+            row["column_name"]
+            for row in await connection.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'arbitrage_pairs'
+                """
+            )
+        }
+        if existing_columns and existing_columns != ARBITRAGE_PAIR_COLUMNS:
+            await connection.execute("DROP TABLE arbitrage_pairs CASCADE")
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -233,36 +257,33 @@ async def initialize_database() -> None:
             CREATE TABLE IF NOT EXISTS arbitrage_pairs (
                 id BIGSERIAL PRIMARY KEY,
                 cme_name VARCHAR(100) NOT NULL,
-                cme_expiration DATE,
+                cme_data_exp DATE,
                 cme_price NUMERIC(18, 4),
-                cme_margin NUMERIC(18, 2),
+                cme_margin_usd NUMERIC(18, 2),
                 cme_lot NUMERIC(18, 4),
-                virt_0 NUMERIC(18, 4) NOT NULL DEFAULT 0,
                 forts_name VARCHAR(100),
-                forts_expiration DATE,
+                forts_data_exp DATE,
                 forts_price NUMERIC(18, 4),
                 price_ratio NUMERIC(18, 4),
                 forts_margin_rub NUMERIC(18, 2),
-                forts_margin_updated_at TIMESTAMPTZ,
-                forts_lot NUMERIC(18, 4),
+                forts_price_step NUMERIC(18, 8),
+                forts_price_step_value NUMERIC(18, 8),
+                forts_trade_lot NUMERIC(18, 8),
                 dte INTEGER,
+                virt_0 NUMERIC(18, 4) NOT NULL DEFAULT 0,
                 diff NUMERIC(18, 4),
                 diff_percent NUMERIC(18, 4),
-                diff_ytm_margin NUMERIC(18, 4),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                diff_ytm_margin NUMERIC(18, 4)
+            );
+
+            CREATE TABLE IF NOT EXISTS currency_rates (
+                currency_code VARCHAR(3) PRIMARY KEY,
+                rate NUMERIC(18, 6) NOT NULL,
+                nominal INTEGER NOT NULL,
+                rate_date DATE NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """
-        )
-        await connection.execute(
-            "ALTER TABLE arbitrage_pairs "
-            "ADD COLUMN IF NOT EXISTS forts_margin_updated_at TIMESTAMPTZ"
-        )
-        await connection.execute(
-            "ALTER TABLE arbitrage_pairs "
-            "ALTER COLUMN virt_0 SET DEFAULT 0"
-        )
-        await connection.execute(
-            "UPDATE arbitrage_pairs SET virt_0 = 0 WHERE virt_0 IS NULL"
         )
         await connection.execute(
             """
@@ -272,27 +293,6 @@ async def initialize_database() -> None:
             """,
             "user",
             password_hash("user1155"),
-        )
-        await connection.execute(
-            """
-            INSERT INTO arbitrage_pairs (
-                cme_name, cme_expiration, cme_price, cme_margin, cme_lot, virt_0,
-                forts_name, forts_expiration, forts_price, price_ratio,
-                forts_margin_rub, forts_lot, dte, diff, diff_percent, diff_ytm_margin
-            )
-            SELECT * FROM UNNEST(
-                $1::varchar[], $2::date[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[],
-                $7::varchar[], $8::date[], $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[],
-                $13::integer[], $14::numeric[], $15::numeric[], $16::numeric[]
-            )
-            WHERE NOT EXISTS (SELECT 1 FROM arbitrage_pairs)
-            """,
-            ["BZ.NYMEX.U2026", "NG.NYMEX.U2026", "MES.CME.U2026", "GC.COMEX.V2026"],
-            [date(2026, 7, 31), date(2026, 8, 27), date(2026, 9, 18), date(2026, 10, 28)],
-            [87.12, 2.86, 7550, 4042], [14000, 7160, 2350, 29270], [1000, 10000, 5, 100], [0, 0, -10, -18],
-            ["BRQ6", "NGQ6", "SFU6", "GDU6"], [date(2026, 8, 3), date(2026, 8, 27), date(2026, 9, 18), date(2026, 9, 18)],
-            [87.35, 2.88, 750, 4032], [1, 1, 10, 1], [15400, 6300, 7500, 28400], [10, 100, 1, 1],
-            [9, 36, 58, 58], [0.23, 0.02, -40, 8], [0.26, 0.70, -0.53, 0.20], [27.72, 13.34, -17.64, 7.68],
         )
 
 
@@ -317,11 +317,17 @@ def _calculate_pair_metrics(
     pair: dict,
     usd_rate: Decimal,
     today: date,
-) -> tuple[int | None, Decimal | None, Decimal | None, Decimal | None]:
+) -> tuple[
+    int | None,
+    Decimal | None,
+    Decimal | None,
+    Decimal | None,
+    Decimal | None,
+]:
     """Рассчитать DTE, diff, доходность на ГО для одной арбитражной пары."""
     expirations = [
         expiration
-        for expiration in (pair["cme_expiration"], pair["forts_expiration"])
+        for expiration in (pair["cme_data_exp"], pair["forts_data_exp"])
         if expiration is not None
     ]
     dte = (min(expirations) - today).days if expirations else None
@@ -334,9 +340,10 @@ def _calculate_pair_metrics(
             "cme_price",
             "virt_0",
             "cme_lot",
-            "forts_lot",
-            "cme_margin",
+            "cme_margin_usd",
             "forts_margin_rub",
+            "forts_price_step",
+            "forts_price_step_value",
         )
     }
     if (
@@ -345,76 +352,143 @@ def _calculate_pair_metrics(
         or any(value is None for value in values.values())
         or usd_rate <= 0
     ):
-        return dte, None, None, None
+        return dte, None, None, None, None
 
     forts_price = values["forts_price"]
     price_ratio = values["price_ratio"]
     cme_price = values["cme_price"]
     virt_0 = values["virt_0"]
     cme_lot = values["cme_lot"]
-    forts_lot = values["forts_lot"]
-    cme_margin = values["cme_margin"]
+    cme_margin_usd = values["cme_margin_usd"]
     forts_margin_rub = values["forts_margin_rub"]
-    if cme_lot <= 0 or forts_lot <= 0:
-        return dte, None, None, None
+    forts_price_step = values["forts_price_step"]
+    forts_price_step_value = values["forts_price_step_value"]
+    if cme_lot <= 0 or forts_price_step <= 0 or forts_price_step_value <= 0:
+        return dte, None, None, None, None
 
-    lot_size = max(cme_lot, forts_lot)
-    # Приводим FORTS ГО к размеру большего лота и переводим его в USD.
-    forts_margin_sum = forts_margin_rub * (lot_size / min(cme_lot, forts_lot)) / usd_rate
-    total_margin = cme_margin + forts_margin_sum
+    forts_trade_lot = cme_lot / (forts_price_step_value / forts_price_step / usd_rate) * price_ratio
+    if forts_trade_lot <= 0:
+        return dte, None, None, None, None
+
+    total_margin = cme_margin_usd + forts_margin_rub * forts_trade_lot / usd_rate
     if total_margin <= 0:
-        return dte, None, None, None
+        return dte, None, None, None, None
 
     diff = forts_price * price_ratio - cme_price - virt_0
-    # Храним процентные пункты, поскольку фронтенд добавляет к значению "%".
-    diff_percent = diff * lot_size / total_margin * Decimal("100")
+    diff_percent = diff * cme_lot / total_margin
     diff_ytm_margin = diff_percent / dte * Decimal("365")
-    return dte, diff, diff_percent, diff_ytm_margin
+    return dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin
 
 
-async def _get_usd_rub_rate() -> Decimal | None:
-    """Получить последнюю цену USD/RUB TOD и кэшировать её на минуту."""
-    global _usd_rate_cache
-    if _usd_rate_cache and monotonic() - _usd_rate_cache[0] < USD_RATE_CACHE_TTL_SECONDS:
-        return _usd_rate_cache[1]
-    if not os.getenv("BCS_REFRESH_TOKEN"):
-        return None
+async def _refresh_cbr_rates() -> list[dict[str, object]]:
+    """Запросить и сохранить официальные курсы USD и CNY с сайта ЦБ РФ."""
+    timeout = aiohttp.ClientTimeout(total=15)
+    connector = aiohttp.TCPConnector(ssl=ssl.create_default_context(cafile=certifi.where()))
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        async with session.get(CBR_DAILY_RATES_URL) as response:
+            response.raise_for_status()
+            payload = await response.read()
 
-    connector = BCSConnector()
-    try:
-        price = await connector.get_last_trade_price()
-    finally:
-        await connector.close()
+    root = ET.fromstring(payload)
+    rate_date = datetime.strptime(root.attrib["Date"], "%d.%m.%Y").date()
+    rates: list[tuple[str, Decimal, int, date]] = []
+    for node in root.findall("Valute"):
+        currency_code = node.findtext("CharCode")
+        if currency_code not in CBR_CURRENCIES:
+            continue
+        nominal = int(node.findtext("Nominal", "0"))
+        value = _as_decimal(node.findtext("Value", "").replace(",", "."))
+        if nominal <= 0 or value is None or value <= 0:
+            continue
+        rates.append((currency_code, value / nominal, nominal, rate_date))
 
-    usd_rate = _as_decimal(price)
-    if usd_rate is not None and usd_rate > 0:
-        _usd_rate_cache = (monotonic(), usd_rate)
-        return usd_rate
-    return None
+    if {rate[0] for rate in rates} != CBR_CURRENCIES:
+        raise ValueError("ЦБ РФ не вернул курсы USD и CNY")
+
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        await connection.executemany(
+            """
+            INSERT INTO currency_rates (currency_code, rate, nominal, rate_date, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (currency_code) DO UPDATE
+            SET rate = EXCLUDED.rate, nominal = EXCLUDED.nominal,
+                rate_date = EXCLUDED.rate_date, updated_at = NOW()
+            """,
+            rates,
+        )
+        rows = await connection.fetch(
+            """
+            SELECT currency_code, rate, nominal, rate_date, updated_at
+            FROM currency_rates
+            WHERE currency_code = ANY($1::varchar[])
+            ORDER BY currency_code
+            """,
+            list(CBR_CURRENCIES),
+        )
+    return [dict(row) for row in rows]
 
 
-async def _refresh_arbitrage_metrics() -> bool:
-    """Пересчитать показатели всех пар с актуальным курсом USD/RUB TOD."""
+async def _currency_rates_are_stale() -> bool:
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        updated_at = await connection.fetchval(
+            "SELECT MIN(updated_at) FROM currency_rates WHERE currency_code = ANY($1::varchar[])",
+            list(CBR_CURRENCIES),
+        )
+    return updated_at is None or datetime.now(timezone.utc) - updated_at >= timedelta(
+        seconds=CBR_RATE_SYNC_INTERVAL_SECONDS
+    )
+
+
+async def _get_cbr_rates() -> list[dict[str, object]]:
+    """Вернуть сохраненные курсы и обновить их, когда истёк шестичасовой интервал."""
+    if await _currency_rates_are_stale():
+        try:
+            return await _refresh_cbr_rates()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ET.ParseError, ValueError):
+            pass
+
     pool = await create_pool()
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
-            SELECT id, cme_expiration, forts_expiration, cme_price, cme_margin,
-                   cme_lot, virt_0, forts_price, price_ratio, forts_margin_rub,
-                   forts_lot
+            SELECT currency_code, rate, nominal, rate_date, updated_at
+            FROM currency_rates
+            WHERE currency_code = ANY($1::varchar[])
+            ORDER BY currency_code
+            """,
+            list(CBR_CURRENCIES),
+        )
+    return [dict(row) for row in rows]
+
+
+async def _refresh_arbitrage_metrics() -> bool:
+    """Пересчитать показатели всех пар с актуальным официальным курсом ЦБ РФ."""
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+                 SELECT id, cme_data_exp, forts_data_exp, cme_price, cme_margin_usd,
+                     cme_lot, virt_0, forts_price, price_ratio, forts_margin_rub,
+                     forts_price_step, forts_price_step_value
             FROM arbitrage_pairs
             """
         )
 
-    usd_rate = await _get_usd_rub_rate()
+    cbr_rates = await _get_cbr_rates()
+    usd_rate = next(
+        (_as_decimal(rate["rate"]) for rate in cbr_rates if rate["currency_code"] == "USD"),
+        None,
+    )
     if usd_rate is None:
         return False
 
     today = date.today()
     updates = [
-        (diff, diff_percent, diff_ytm_margin, dte, row["id"])
+        (forts_trade_lot, diff, diff_percent, diff_ytm_margin, dte, row["id"])
         for row in rows
-        for dte, diff, diff_percent, diff_ytm_margin in [
+        for dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin in [
             _calculate_pair_metrics(dict(row), usd_rate, today)
         ]
     ]
@@ -422,8 +496,9 @@ async def _refresh_arbitrage_metrics() -> bool:
         await connection.executemany(
             """
             UPDATE arbitrage_pairs
-            SET diff = $1, diff_percent = $2, diff_ytm_margin = $3, dte = $4
-            WHERE id = $5
+            SET forts_trade_lot = $1, diff = $2, diff_percent = $3,
+                diff_ytm_margin = $4, dte = $5
+            WHERE id = $6
             """,
             updates,
         )
@@ -598,6 +673,27 @@ async def _stop_forts_margin_sync() -> None:
         _forts_margin_sync_task = None
 
 
+async def _sync_cbr_rates_periodically() -> None:
+    """Обновлять сохраненные официальные курсы ЦБ РФ каждые шесть часов."""
+    while True:
+        try:
+            rates = await _refresh_cbr_rates()
+            print(f"Курсы ЦБ РФ обновлены: {len(rates)} валют.", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"Ошибка обновления курсов ЦБ РФ: {error}", flush=True)
+        await asyncio.sleep(CBR_RATE_SYNC_INTERVAL_SECONDS)
+
+
+async def _stop_cbr_rate_sync() -> None:
+    global _cbr_rate_sync_task
+    if _cbr_rate_sync_task is not None:
+        _cbr_rate_sync_task.cancel()
+        await asyncio.gather(_cbr_rate_sync_task, return_exceptions=True)
+        _cbr_rate_sync_task = None
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> str:
@@ -616,7 +712,7 @@ async def get_current_user(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Жизненный цикл приложения: инициализация / cleanup."""
-    global _reference_sync_task, _forts_margin_sync_task
+    global _reference_sync_task, _forts_margin_sync_task, _cbr_rate_sync_task
     await initialize_database()
     await _restart_market_subscriptions()
     # Планировщик стартует вместе с API и сам ждёт ближайшие 03:00 UTC.
@@ -626,7 +722,11 @@ async def lifespan(_: FastAPI):
     _forts_margin_sync_task = asyncio.create_task(
         _sync_forts_margins_periodically(), name="forts-margin-sync"
     )
+    _cbr_rate_sync_task = asyncio.create_task(
+        _sync_cbr_rates_periodically(), name="cbr-rate-sync"
+    )
     yield
+    await _stop_cbr_rate_sync()
     await _stop_forts_margin_sync()
     await _stop_reference_data_sync()
     await _stop_market_subscriptions()
@@ -680,15 +780,20 @@ async def list_arbitrage_pairs(_: str = Depends(get_current_user)):
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
-            SELECT id, cme_name, cme_expiration, cme_price, cme_margin, cme_lot, virt_0,
-                   forts_name, forts_expiration, forts_price, price_ratio, forts_margin_rub,
-                   forts_lot, dte,
+                 SELECT id, cme_name, cme_data_exp, cme_price, cme_margin_usd, cme_lot,
+                     forts_name, forts_data_exp, forts_price, price_ratio, forts_margin_rub,
+                     forts_price_step, forts_price_step_value, forts_trade_lot, dte, virt_0,
                    diff, diff_percent, diff_ytm_margin
             FROM arbitrage_pairs
             ORDER BY id
             """
         )
     return {"pairs": [dict(row) for row in rows]}
+
+
+@app.get("/api/currency-rates")
+async def list_currency_rates(_: str = Depends(get_current_user)):
+    return {"source": "ЦБ РФ", "rates": await _get_cbr_rates()}
 
 
 @app.get("/api/arbitrage-pairs/events")
@@ -764,14 +869,18 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
             """
             UPDATE arbitrage_pairs
             SET
-                cme_expiration = ex.maturity_date,
+                cme_data_exp = ex.maturity_date,
                 cme_lot = ex.lot_size,
-                forts_expiration = (
+                forts_data_exp = (
                     SELECT maturity_date FROM bcs_market_data
                     WHERE ticker = arbitrage_pairs.forts_name
                 ),
-                forts_lot = (
-                    SELECT lot_size FROM bcs_market_data
+                forts_price_step = (
+                    SELECT minimum_step FROM bcs_market_data
+                    WHERE ticker = arbitrage_pairs.forts_name
+                ),
+                forts_price_step_value = (
+                    SELECT step_price FROM bcs_market_data
                     WHERE ticker = arbitrage_pairs.forts_name
                 )
             FROM exante_market_data ex
@@ -782,7 +891,12 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
         )
         # Перечитать обновлённую запись
         row = await connection.fetchrow(
-            "SELECT id, cme_name, cme_expiration, forts_name, forts_expiration, cme_lot, forts_lot FROM arbitrage_pairs WHERE id = $1",
+                 """
+                 SELECT id, cme_name, cme_data_exp, forts_name, forts_data_exp, cme_lot,
+                     forts_price_step, forts_price_step_value
+                 FROM arbitrage_pairs
+                 WHERE id = $1
+                 """,
             row["id"],
         )
     await _restart_market_subscriptions()
@@ -807,7 +921,7 @@ async def update_pair_manual_value(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Значение должно быть конечным числом",
         )
-    if request.field in {"cme_margin", "forts_margin_rub"} and request.value < 0:
+    if request.field == "cme_margin_usd" and request.value < 0:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Margin не может быть отрицательным",

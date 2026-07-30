@@ -46,15 +46,37 @@
           </form>
         </section>
         <p v-if="tableError" class="form-error table-error">{{ tableError }}</p>
+        <section class="currency-rates" aria-label="Официальные курсы ЦБ РФ">
+          <div class="currency-rates-title"><span>КУРСЫ ЦБ РФ</span><small>официальный курс за {{ currencyRateDate }}</small></div>
+          <div class="currency-rate" v-for="rate in currencyRates" :key="rate.currency_code"><strong>{{ rate.currency_code }}/RUB</strong><span>{{ formatNumber(rate.rate, 4) }} RUB</span></div>
+          <span v-if="!currencyRates.length" class="currency-rates-empty">Курсы пока недоступны</span>
+        </section>
         <section class="table-section">
-          <div class="table-toolbar"><span><i></i> CME / FORTS</span><span>{{ pairs.length }} инструмент{{ pairEnding }}</span></div>
-          <div class="table-wrap"><table ref="tableRef"><colgroup><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /><col /></colgroup><thead><tr>
-            <th>CME name</th><th>Дата exp</th><th>Price</th><th>CME margin</th><th>Lot</th><th>Virt_0</th><th>FORTS name</th><th>Дата exp</th><th>Price</th><th>Price ratio</th><th>FORTS margin, RUB</th><th>Lot</th><th>DTE</th><th>Diff</th><th>Diff, %</th><th>Diff, YTM margin</th>
+          <div class="table-toolbar"><span><i></i> CME / FORTS</span><div class="table-toolbar-actions"><span>{{ pairs.length }} инструмент{{ pairEnding }}</span><button class="details-toggle" type="button" :aria-expanded="showContractDetails" @click="showContractDetails = !showContractDetails">{{ showContractDetails ? 'Скрыть параметры' : 'Параметры контрактов' }}</button></div></div>
+          <div class="table-wrap"><table :class="{ 'is-compact': !showContractDetails }"><colgroup v-if="!showContractDetails"><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="ratio-column" /><col class="dte-column" /><col class="virt-column" /><col class="diff-column" /><col class="percent-column" /><col class="ytm-column" /></colgroup><thead><tr>
+            <th><span class="header-label">CME<br>name</span></th><th><span class="header-label">CME<br>exp</span></th><th><span class="header-label">CME<br>price</span></th><th v-if="showContractDetails"><span class="header-label">CME margin,<br>USD</span></th><th v-if="showContractDetails"><span class="header-label">CME<br>lot</span></th><th><span class="header-label">FORTS<br>name</span></th><th><span class="header-label">FORTS<br>exp</span></th><th><span class="header-label">FORTS<br>price</span></th><th><span class="header-label">Price<br>ratio</span></th><th v-if="showContractDetails"><span class="header-label">FORTS margin,<br>RUB</span></th><th v-if="showContractDetails"><span class="header-label">Price<br>step</span></th><th v-if="showContractDetails"><span class="header-label">Step<br>value</span></th><th v-if="showContractDetails"><span class="header-label">Trade<br>lot</span></th><th>DTE</th><th>Virt_0</th><th>Diff</th><th><span class="header-label">Diff,<br>%</span></th><th><span class="header-label">Diff,<br>YTM</span></th>
           </tr></thead><tbody>
-            <tr v-if="loading"><td colspan="16" class="empty-state">Загрузка данных...</td></tr>
-            <tr v-else-if="!pairs.length"><td colspan="16" class="empty-state">Арбитражных пар пока нет.</td></tr>
+            <tr v-if="loading"><td :colspan="visibleColumnCount" class="empty-state">Загрузка данных...</td></tr>
+            <tr v-else-if="!pairs.length"><td :colspan="visibleColumnCount" class="empty-state">Арбитражных пар пока нет.</td></tr>
             <tr v-for="pair in pairs" :key="pair.id">
-              <td class="instrument">{{ pair.cme_name }}</td><td>{{ formatDate(pair.cme_expiration) }}</td><td>{{ formatNumber(pair.cme_price) }}</td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'cme_margin') }" @dblclick="startCellEdit(pair, 'cme_margin')"><input v-if="isEditingCell(pair.id, 'cme_margin')" ref="editorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.cme_margin, 0) }}</span></td><td>{{ formatNumber(pair.cme_lot) }}</td><td class="editable-cell" :class="[numberClass(pair.virt_0), { 'is-invalid': isInvalidCell(pair.id, 'virt_0') }]" @dblclick="startCellEdit(pair, 'virt_0')"><input v-if="isEditingCell(pair.id, 'virt_0')" ref="editorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.virt_0) }}</span></td><td class="instrument">{{ pair.forts_name || 'Ожидает настройки' }}</td><td>{{ formatDate(pair.forts_expiration) }}</td><td>{{ formatNumber(pair.forts_price) }}</td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'price_ratio') }" @dblclick="startCellEdit(pair, 'price_ratio')"><input v-if="isEditingCell(pair.id, 'price_ratio')" ref="editorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.price_ratio) }}</span></td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'forts_margin_rub') }" @dblclick="startCellEdit(pair, 'forts_margin_rub')"><input v-if="isEditingCell(pair.id, 'forts_margin_rub')" ref="editorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.forts_margin_rub, 0) }}</span></td><td>{{ formatNumber(pair.forts_lot) }}</td><td>{{ pair.dte ?? '—' }}</td><td :class="numberClass(pair.diff)">{{ formatNumber(pair.diff) }}</td><td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td><td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td>
+              <td class="instrument" :title="pair.cme_name">{{ pair.cme_name }}</td>
+              <td>{{ formatDate(pair.cme_data_exp) }}</td>
+              <td>{{ formatNumber(pair.cme_price) }}</td>
+              <td v-if="showContractDetails" class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'cme_margin_usd') }" @click="startCellEdit(pair, 'cme_margin_usd')"><input v-if="isEditingCell(pair.id, 'cme_margin_usd')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.cme_margin_usd, 0) }}</span></td>
+              <td v-if="showContractDetails">{{ formatNumber(pair.cme_lot) }}</td>
+              <td class="instrument" :title="pair.forts_name || 'Ожидает настройки'">{{ pair.forts_name || 'Ожидает настройки' }}</td>
+              <td>{{ formatDate(pair.forts_data_exp) }}</td>
+              <td>{{ formatNumber(pair.forts_price) }}</td>
+              <td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'price_ratio') }" @click="startCellEdit(pair, 'price_ratio')"><input v-if="isEditingCell(pair.id, 'price_ratio')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.price_ratio) }}</span></td>
+              <td v-if="showContractDetails">{{ formatNumber(pair.forts_margin_rub, 0) }}</td>
+              <td v-if="showContractDetails">{{ formatNumber(pair.forts_price_step, 8) }}</td>
+              <td v-if="showContractDetails">{{ formatNumber(pair.forts_price_step_value, 8) }}</td>
+              <td v-if="showContractDetails">{{ formatNumber(pair.forts_trade_lot, 4) }}</td>
+              <td>{{ pair.dte ?? '—' }}</td>
+              <td class="editable-cell" :class="[numberClass(pair.virt_0), { 'is-invalid': isInvalidCell(pair.id, 'virt_0') }]" @click="startCellEdit(pair, 'virt_0')"><input v-if="isEditingCell(pair.id, 'virt_0')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.virt_0) }}</span></td>
+              <td :class="numberClass(pair.diff)">{{ formatNumber(pair.diff) }}</td>
+              <td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td>
+              <td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td>
             </tr>
           </tbody></table></div>
         </section>
@@ -83,13 +105,14 @@ const bcsOptions = ref([])
 const exanteHint = ref('Начните вводить тикер или symbolId EXANTE.')
 const bcsHint = ref('Начните вводить тикер BCS.')
 const updatedAt = ref('—')
+const currencyRates = ref([])
 const searchTimers = { exante: null, bcs: null }
 const editingCell = ref(null)
 const editorInput = ref(null)
 const invalidCells = ref({})
+const showContractDetails = ref(false)
 let priceEvents = null
 let priceRefreshTimer = null
-const tableRef = ref(null)
 
 function authHeaders() { return { Authorization: `Bearer ${token.value}` } }
 async function login() {
@@ -100,7 +123,7 @@ async function login() {
     if (!response.ok) throw new Error(data.detail || 'Не удалось выполнить вход')
     token.value = data.access_token; username.value = data.username
     localStorage.setItem('arbitrage_token', token.value); localStorage.setItem('arbitrage_username', username.value)
-    await loadPairs(); connectPriceEvents()
+    await Promise.all([loadPairs(), loadCurrencyRates()]); connectPriceEvents()
   } catch (error) { loginError.value = error.message } finally { loginPending.value = false }
 }
 async function loadPairs(showLoading = true) {
@@ -112,23 +135,19 @@ async function loadPairs(showLoading = true) {
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || 'Не удалось получить данные')
     pairs.value = data.pairs
-    preserveTableColumnWidths()
     updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
   } catch (error) { tableError.value = error.message } finally { if (showLoading) loading.value = false }
 }
-function preserveTableColumnWidths() {
-  nextTick(() => {
-    const table = tableRef.value
-    if (!table) return
-    const columns = table.querySelectorAll('col')
-    const headers = table.querySelectorAll('thead th')
-    if (!columns.length || columns.length !== headers.length) return
-    headers.forEach((header, index) => {
-      const currentWidth = parseFloat(columns[index].style.width) || 0
-      const measuredWidth = header.getBoundingClientRect().width
-      columns[index].style.width = `${Math.max(currentWidth, measuredWidth)}px`
-    })
-  })
+async function loadCurrencyRates() {
+  try {
+    const response = await fetch('/api/currency-rates', { headers: authHeaders() })
+    if (response.status === 401) return logout()
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Не удалось получить курсы валют')
+    currencyRates.value = Array.isArray(data.rates) ? data.rates : []
+  } catch (error) {
+    currencyRates.value = []
+  }
 }
 function connectPriceEvents() {
   priceEvents?.close()
@@ -150,6 +169,7 @@ async function addPair() {
 function cellKey(pairId, field) { return `${pairId}:${field}` }
 function isEditingCell(pairId, field) { return editingCell.value?.pairId === pairId && editingCell.value?.field === field }
 function isInvalidCell(pairId, field) { return Boolean(invalidCells.value[cellKey(pairId, field)]) }
+function setEditorInput(element) { editorInput.value = element }
 function startCellEdit(pair, field) {
   if (editingCell.value) return
   const key = cellKey(pair.id, field)
@@ -162,7 +182,7 @@ function validateManualValue(field, value) {
   const normalized = String(value).trim().replace(',', '.')
   if (!normalized || !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(normalized)) return null
   const parsed = Number(normalized)
-  if (!Number.isFinite(parsed) || ((field === 'cme_margin' || field === 'forts_margin_rub') && parsed < 0)) return null
+  if (!Number.isFinite(parsed) || field === 'cme_margin_usd' && parsed < 0) return null
   return normalized
 }
 async function saveCellEdit(pair) {
@@ -228,8 +248,10 @@ function formatDate(value) { return value ? new Intl.DateTimeFormat('ru-RU').for
 function formatNumber(value, maximumFractionDigits = 2) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits }).format(value) }
 function formatPercent(value) { return value === null || value === undefined ? '—' : `${formatNumber(value)}%` }
 function numberClass(value) { return value > 0 ? 'positive' : value < 0 ? 'negative' : '' }
+const currencyRateDate = computed(() => currencyRates.value[0]?.rate_date ? formatDate(currencyRates.value[0].rate_date) : '—')
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
-onMounted(() => { if (authenticated.value) { loadPairs(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
+const visibleColumnCount = computed(() => showContractDetails.value ? 18 : 12)
+onMounted(() => { if (authenticated.value) { loadPairs(); loadCurrencyRates(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
 onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
 </script>
 
@@ -242,5 +264,7 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .topbar { min-height: 70px; display: flex; justify-content: space-between; align-items: center; padding: 12px max(22px, calc((100% - 1440px) / 2)); border-bottom: 1px solid #2c3632; background: rgba(14,19,18,.94); } .brand, .topbar-actions { display: flex; align-items: center; gap: 12px; } .brand strong { display: block; margin-top: 3px; font-size: 14px; } .market-status, .user-name, .logout-button { color: #aeb9b3; font: 11px 'IBM Plex Mono', monospace; } .logout-button { border: 1px solid #3b4742; border-radius: 2px; padding: 8px 10px; background: transparent; } .logout-button:hover { color: #fff; border-color: #76837d; }
 .workspace { max-width: 1440px; margin: 0 auto; padding: 46px 22px; } .dashboard-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 34px; } .dashboard-heading h1 { margin: 8px 0 7px; font-size: clamp(26px,3vw,38px); line-height: 1; letter-spacing: 0; } .dashboard-heading > div > p:last-child, .add-pair-row span { margin: 0; color: #8f9d96; font-size: 13px; } .heading-metrics { display: flex; gap: 30px; } .heading-metrics div { min-width: 84px; border-left: 1px solid #3a4641; padding-left: 12px; } .heading-metrics span { display: block; color: #7f8d86; font: 10px 'IBM Plex Mono', monospace; letter-spacing: .7px; } .heading-metrics strong { display: block; margin-top: 4px; color: #e4eee9; font: 600 15px 'IBM Plex Mono', monospace; }
 .add-pair-row { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 19px 20px; margin-bottom: 18px; border: 1px solid #35423d; background: #19201e; } .section-label { margin-bottom: 7px; } .add-pair-form { display: flex; width: min(100%,700px); gap: 8px; align-items: end; } .pair-fields { display: flex; flex: 1; gap: 8px; } .pair-fields input { margin: 0; flex: 1; min-width: 0; } .pair-select { flex: 1; margin: 0; min-width: 0; } .pair-select input { margin-top: 7px; } .pair-hint { display: block; margin-top: 7px; color: #7f8d86; font-size: 11px; line-height: 1.4; text-transform: none; letter-spacing: 0; } .add-pair-form .primary-button { white-space: nowrap; } .table-section { border: 1px solid #35423d; background: #141a18; } .table-toolbar { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #35423d; color: #aeb9b3; font: 11px 'IBM Plex Mono', monospace; } .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font: 11px 'IBM Plex Mono', monospace; } th { padding: 13px 12px; color: #84948c; font-weight: 500; text-align: right; white-space: nowrap; background: #171e1b; } td { padding: 14px 12px; color: #dbe4df; text-align: right; white-space: nowrap; border-top: 1px solid #28322e; } th:first-child, th:nth-child(7), td:first-child, td:nth-child(7) { text-align: left; } tbody tr:hover { background: #1a2420; } .instrument { color: #f0f7f3; font-weight: 600; } .positive { color: #75dbb6; } .negative { color: #ff9989; } .editable-cell { cursor: text; outline: 1px dashed transparent; outline-offset: -4px; } .editable-cell:hover { outline-color: #587269; background: #18221e; } .editable-cell input { width: 100%; min-width: 72px; margin: -7px 0; border-color: #77d6b6; padding: 6px 7px; text-align: right; font: inherit; } .editable-cell.is-invalid { color: #ff9d8b; outline-color: #ff7567; background: rgba(158, 54, 44, .24); } .editable-cell.is-invalid input { border-color: #ff7567; } .empty-state { padding: 35px; color: #8f9d96; text-align: center !important; } .table-error { margin-bottom: 14px; }
-@media (max-width: 700px) { .topbar, .dashboard-heading, .add-pair-row { align-items: flex-start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: space-between; } .workspace { padding: 30px 14px; } .heading-metrics { width: 100%; } .add-pair-form { width: 100%; flex-direction: column; } .pair-fields { width: 100%; flex-direction: column; } .pair-select { width: 100%; } .add-pair-form .primary-button { width: 100%; } .login-panel { padding: 28px 23px; } }
+.currency-rates { display: flex; align-items: stretch; margin-bottom: 18px; border: 1px solid #35423d; background: #161d1a; font: 11px 'IBM Plex Mono', monospace; } .currency-rates-title, .currency-rate { display: flex; flex-direction: column; justify-content: center; padding: 12px 16px; border-right: 1px solid #35423d; } .currency-rates-title { min-width: 215px; color: #77d6b6; letter-spacing: .6px; } .currency-rates-title small, .currency-rates-empty { margin-top: 4px; color: #7f8d86; font-size: 10px; letter-spacing: 0; } .currency-rate { min-width: 150px; gap: 4px; } .currency-rate strong { color: #aeb9b3; font-weight: 500; } .currency-rate span { color: #e4eee9; font-size: 13px; font-weight: 600; } .currency-rates-empty { align-self: center; margin: 0; padding: 0 16px; }
+.table-toolbar { align-items: center; gap: 12px; padding: 10px 12px; } .table-toolbar-actions { display: flex; align-items: center; gap: 12px; } .details-toggle { border: 1px solid #46574f; border-radius: 2px; padding: 6px 8px; color: #b9c7c0; background: #19211e; font: 10px 'IBM Plex Mono', monospace; } .details-toggle:hover { border-color: #77d6b6; color: #e7f4ed; } th, td { text-align: center !important; } th { padding: 9px 8px; line-height: 1.25; } .header-label { display: inline-block; } table.is-compact { min-width: 920px; table-layout: fixed; } .contract-column { width: 14%; } .date-column { width: 9%; } .price-column, .ratio-column { width: 8%; } .dte-column, .percent-column { width: 5%; } .virt-column, .diff-column { width: 7%; } .ytm-column { width: 6%; } td { max-width: 132px; padding: 10px 8px; } .instrument { display: block; max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; } .editable-cell input { min-width: 64px; margin: -5px 0; padding: 5px 6px; }
+@media (max-width: 700px) { .topbar, .dashboard-heading, .add-pair-row { align-items: flex-start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: space-between; } .workspace { padding: 30px 14px; } .heading-metrics { width: 100%; } .add-pair-form { width: 100%; flex-direction: column; } .pair-fields { width: 100%; flex-direction: column; } .pair-select { width: 100%; } .add-pair-form .primary-button { width: 100%; } .currency-rates { flex-wrap: wrap; } .currency-rates-title { width: 100%; min-width: 0; border-bottom: 1px solid #35423d; } .currency-rate { flex: 1; min-width: 0; } .currency-rate:last-of-type { border-right: 0; } .login-panel { padding: 28px 23px; } }
 </style>
