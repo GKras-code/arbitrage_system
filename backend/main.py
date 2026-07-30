@@ -63,7 +63,7 @@ _price_update_subscribers: set[asyncio.Queue[None]] = set()
 ARBITRAGE_PAIR_COLUMNS = {
     "id", "cme_name", "cme_data_exp", "cme_price", "cme_margin_usd", "cme_lot",
     "forts_name", "forts_data_exp", "forts_price", "price_ratio", "forts_margin_rub",
-    "forts_price_step", "forts_price_step_value", "forts_trade_lot", "dte", "virt_0",
+    "forts_price_step", "forts_price_step_value", "forts_trade_lot", "trade_lot_currency", "dte", "virt_0",
     "diff", "diff_percent", "diff_ytm_margin",
 }
 
@@ -81,6 +81,10 @@ class PairCreateRequest(BaseModel):
 class PairManualValueUpdate(BaseModel):
     field: Literal["virt_0", "price_ratio", "cme_margin_usd"]
     value: Decimal
+
+
+class PairTradeLotCurrencyUpdate(BaseModel):
+    currency: Literal["USD", "CNY"]
 
 
 def password_hash(password: str) -> str:
@@ -243,7 +247,7 @@ async def initialize_database() -> None:
                 """
             )
         }
-        if existing_columns and existing_columns != ARBITRAGE_PAIR_COLUMNS:
+        if existing_columns and not existing_columns <= ARBITRAGE_PAIR_COLUMNS:
             await connection.execute("DROP TABLE arbitrage_pairs CASCADE")
         await connection.execute(
             """
@@ -269,6 +273,8 @@ async def initialize_database() -> None:
                 forts_price_step NUMERIC(18, 8),
                 forts_price_step_value NUMERIC(18, 8),
                 forts_trade_lot NUMERIC(18, 8),
+                trade_lot_currency VARCHAR(3) NOT NULL DEFAULT 'USD'
+                    CHECK (trade_lot_currency IN ('USD', 'CNY')),
                 dte INTEGER,
                 virt_0 NUMERIC(18, 4) NOT NULL DEFAULT 0,
                 diff NUMERIC(18, 4),
@@ -283,6 +289,13 @@ async def initialize_database() -> None:
                 rate_date DATE NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            """
+        )
+        await connection.execute(
+            """
+            ALTER TABLE arbitrage_pairs
+            ADD COLUMN IF NOT EXISTS trade_lot_currency VARCHAR(3) NOT NULL DEFAULT 'USD'
+                CHECK (trade_lot_currency IN ('USD', 'CNY'))
             """
         )
         await connection.execute(
@@ -315,7 +328,7 @@ def _as_decimal(value: object) -> Decimal | None:
 
 def _calculate_pair_metrics(
     pair: dict,
-    usd_rate: Decimal,
+    trade_lot_rate: Decimal | None,
     today: date,
 ) -> tuple[
     int | None,
@@ -350,7 +363,8 @@ def _calculate_pair_metrics(
         dte is None
         or dte <= 0
         or any(value is None for value in values.values())
-        or usd_rate <= 0
+        or trade_lot_rate is None
+        or trade_lot_rate <= 0
     ):
         return dte, None, None, None, None
 
@@ -366,11 +380,11 @@ def _calculate_pair_metrics(
     if cme_lot <= 0 or forts_price_step <= 0 or forts_price_step_value <= 0:
         return dte, None, None, None, None
 
-    forts_trade_lot = cme_lot / (forts_price_step_value / forts_price_step / usd_rate) * price_ratio
+    forts_trade_lot = cme_lot / (forts_price_step_value / forts_price_step / trade_lot_rate) * price_ratio
     if forts_trade_lot <= 0:
         return dte, None, None, None, None
 
-    total_margin = cme_margin_usd + forts_margin_rub * forts_trade_lot / usd_rate
+    total_margin = cme_margin_usd + forts_margin_rub * forts_trade_lot / trade_lot_rate
     if total_margin <= 0:
         return dte, None, None, None, None
 
@@ -464,24 +478,24 @@ async def _get_cbr_rates() -> list[dict[str, object]]:
 
 
 async def _refresh_arbitrage_metrics() -> bool:
-    """Пересчитать показатели всех пар с актуальным официальным курсом ЦБ РФ."""
+    """Пересчитать показатели всех пар с выбранным официальным курсом ЦБ РФ."""
     pool = await create_pool()
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
                  SELECT id, cme_data_exp, forts_data_exp, cme_price, cme_margin_usd,
                      cme_lot, virt_0, forts_price, price_ratio, forts_margin_rub,
-                     forts_price_step, forts_price_step_value
+                     forts_price_step, forts_price_step_value, trade_lot_currency
             FROM arbitrage_pairs
             """
         )
 
     cbr_rates = await _get_cbr_rates()
-    usd_rate = next(
-        (_as_decimal(rate["rate"]) for rate in cbr_rates if rate["currency_code"] == "USD"),
-        None,
-    )
-    if usd_rate is None:
+    rates_by_currency = {
+        str(rate["currency_code"]): _as_decimal(rate["rate"])
+        for rate in cbr_rates
+    }
+    if not rates_by_currency:
         return False
 
     today = date.today()
@@ -489,7 +503,11 @@ async def _refresh_arbitrage_metrics() -> bool:
         (forts_trade_lot, diff, diff_percent, diff_ytm_margin, dte, row["id"])
         for row in rows
         for dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin in [
-            _calculate_pair_metrics(dict(row), usd_rate, today)
+            _calculate_pair_metrics(
+                dict(row),
+                rates_by_currency.get(str(row["trade_lot_currency"])),
+                today,
+            )
         ]
     ]
     async with pool.acquire() as connection:
@@ -782,7 +800,7 @@ async def list_arbitrage_pairs(_: str = Depends(get_current_user)):
             """
                  SELECT id, cme_name, cme_data_exp, cme_price, cme_margin_usd, cme_lot,
                      forts_name, forts_data_exp, forts_price, price_ratio, forts_margin_rub,
-                     forts_price_step, forts_price_step_value, forts_trade_lot, dte, virt_0,
+                                         forts_price_step, forts_price_step_value, forts_trade_lot, trade_lot_currency, dte, virt_0,
                    diff, diff_percent, diff_ytm_margin
             FROM arbitrage_pairs
             ORDER BY id
@@ -959,6 +977,32 @@ async def update_pair_manual_value(
     await _refresh_arbitrage_metrics()
     await _publish_price_update()
     return {"id": row["id"], "field": request.field, "value": row["value"]}
+
+
+@app.patch("/api/arbitrage-pairs/{pair_id}/trade-lot-currency")
+async def update_pair_trade_lot_currency(
+    pair_id: int,
+    request: PairTradeLotCurrencyUpdate,
+    _: str = Depends(get_current_user),
+):
+    """Выбрать валюту официального курса ЦБ РФ для расчёта пары."""
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            """
+            UPDATE arbitrage_pairs
+            SET trade_lot_currency = $1
+            WHERE id = $2
+            RETURNING id, trade_lot_currency
+            """,
+            request.currency,
+            pair_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пара не найдена")
+    await _refresh_arbitrage_metrics()
+    await _publish_price_update()
+    return {"id": row["id"], "trade_lot_currency": row["trade_lot_currency"]}
 
 
 @app.get("/api/instrument-options")
