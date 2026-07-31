@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
-import re
 import ssl
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -50,7 +49,7 @@ REFERENCE_CACHE_TTL_SECONDS = 15 * 60
 REFERENCE_SYNC_HOUR_UTC = 3
 FORTS_MARGIN_SYNC_INTERVAL_SECONDS = 3 * 60 * 60
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
-MOEX_CONTRACT_URL = "https://www.moex.com/ru/contract.aspx?code={ticker}"
+MOEX_FUTURES_SECURITY_URL = "https://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}.json"
 CURRENCY_RATE_SOURCES = {
     "USD": ("EUR/USD", Decimal("10")),
     "CNY": ("USD/CNY", Decimal("1")),
@@ -397,16 +396,20 @@ def _calculate_pair_metrics(
     return dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin
 
 
-def _moex_step_price(page: str) -> Decimal | None:
-    """Извлечь стоимость шага цены из карточки фьючерса MOEX."""
-    match = re.search(
-        r"Стоимость\s+шага\s+цены\s*(?:</[^>]+>\s*<[^>]+>\s*)?([\d\s,.]+)",
-        page,
-        flags=re.IGNORECASE,
-    )
-    if match is None:
+def _moex_step_price(payload: dict[str, object]) -> Decimal | None:
+    """Извлечь стоимость шага цены из публичного ответа MOEX ISS."""
+    securities = payload.get("securities")
+    if not isinstance(securities, dict):
         return None
-    return _as_decimal(match.group(1).replace("\xa0", "").replace(" ", "").replace(",", "."))
+    columns = securities.get("columns")
+    rows = securities.get("data")
+    if not isinstance(columns, list) or not isinstance(rows, list) or not rows:
+        return None
+    try:
+        value = rows[0][columns.index("STEPPRICE")]
+    except (IndexError, ValueError):
+        return None
+    return _as_decimal(value)
 
 
 async def _refresh_currency_rates() -> list[dict[str, object]]:
@@ -416,7 +419,8 @@ async def _refresh_currency_rates() -> list[dict[str, object]]:
         source_rows = await connection.fetch(
             "SELECT base_asset, ticker FROM bcs_market_data "
             "WHERE base_asset = ANY($1::text[]) AND ticker <> '' "
-            "ORDER BY ticker",
+            "AND (maturity_date IS NULL OR maturity_date >= CURRENT_DATE) "
+            "ORDER BY base_asset, maturity_date NULLS LAST, ticker",
             [source[0] for source in CURRENCY_RATE_SOURCES.values()],
         )
     tickers_by_asset: dict[str, str] = {}
@@ -434,18 +438,24 @@ async def _refresh_currency_rates() -> list[dict[str, object]]:
     timeout = aiohttp.ClientTimeout(total=15)
     connector = aiohttp.TCPConnector(ssl=ssl.create_default_context(cafile=certifi.where()))
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-        pages = {}
+        payloads = {}
         for currency_code, (base_asset, _) in CURRENCY_RATE_SOURCES.items():
-            async with session.get(MOEX_CONTRACT_URL.format(ticker=tickers_by_asset[base_asset])) as response:
+            async with session.get(
+                MOEX_FUTURES_SECURITY_URL.format(ticker=tickers_by_asset[base_asset]),
+                params={"iss.meta": "off", "iss.only": "securities"},
+            ) as response:
                 response.raise_for_status()
-                pages[currency_code] = await response.text()
+                payloads[currency_code] = await response.json(content_type=None)
 
     rate_date = date.today()
     rates: list[tuple[str, Decimal, int, date]] = []
     for currency_code, (_, multiplier) in CURRENCY_RATE_SOURCES.items():
-        step_price = _moex_step_price(pages[currency_code])
+        step_price = _moex_step_price(payloads[currency_code])
         if step_price is None or step_price <= 0:
-            raise ValueError(f"MOEX не вернула стоимость шага цены для {currency_code}")
+            raise ValueError(
+                f"MOEX ISS не вернула стоимость шага цены для {currency_code} "
+                f"({tickers_by_asset[CURRENCY_RATE_SOURCES[currency_code][0]]})"
+            )
         rates.append((currency_code, step_price * multiplier, 1, rate_date))
 
     async with pool.acquire() as connection:
