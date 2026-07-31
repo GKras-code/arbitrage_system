@@ -10,8 +10,8 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
+import re
 import ssl
-import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -50,17 +50,18 @@ REFERENCE_CACHE_TTL_SECONDS = 15 * 60
 REFERENCE_SYNC_HOUR_UTC = 3
 FORTS_MARGIN_SYNC_INTERVAL_SECONDS = 3 * 60 * 60
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
-CBR_DAILY_RATES_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
-CBR_CURRENCIES = {"USD", "CNY"}
-MOSCOW_TIMEZONE = timezone(timedelta(hours=3), "MSK")
-CBR_RATE_SYNC_HOUR_MSK = 3
-CBR_RATE_SYNC_MINUTE_MSK = 1
+MOEX_CONTRACT_URL = "https://www.moex.com/ru/contract.aspx?code={ticker}"
+CURRENCY_RATE_SOURCES = {
+    "USD": ("EUR/USD", Decimal("10")),
+    "CNY": ("USD/CNY", Decimal("1")),
+}
+CURRENCY_RATE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 
 _instrument_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 _market_data_tasks: list[asyncio.Task] = []
 _reference_sync_task: asyncio.Task | None = None
 _forts_margin_sync_task: asyncio.Task | None = None
-_cbr_rate_sync_task: asyncio.Task | None = None
+_currency_rate_sync_task: asyncio.Task | None = None
 _price_update_subscribers: set[asyncio.Queue[None]] = set()
 ARBITRAGE_PAIR_COLUMNS = {
     "id", "cme_name", "cme_data_exp", "cme_price", "cme_margin_usd", "cme_lot",
@@ -396,32 +397,57 @@ def _calculate_pair_metrics(
     return dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin
 
 
-async def _refresh_cbr_rates() -> list[dict[str, object]]:
-    """Запросить и сохранить официальные курсы USD и CNY с сайта ЦБ РФ."""
+def _moex_step_price(page: str) -> Decimal | None:
+    """Извлечь стоимость шага цены из карточки фьючерса MOEX."""
+    match = re.search(
+        r"Стоимость\s+шага\s+цены\s*(?:</[^>]+>\s*<[^>]+>\s*)?([\d\s,.]+)",
+        page,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return _as_decimal(match.group(1).replace("\xa0", "").replace(" ", "").replace(",", "."))
+
+
+async def _refresh_currency_rates() -> list[dict[str, object]]:
+    """Рассчитать и сохранить курсы USD и CNY по стоимости шага фьючерсов MOEX."""
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        source_rows = await connection.fetch(
+            "SELECT base_asset, ticker FROM bcs_market_data "
+            "WHERE base_asset = ANY($1::text[]) AND ticker <> '' "
+            "ORDER BY ticker",
+            [source[0] for source in CURRENCY_RATE_SOURCES.values()],
+        )
+    tickers_by_asset: dict[str, str] = {}
+    for row in source_rows:
+        tickers_by_asset.setdefault(str(row["base_asset"]), str(row["ticker"]))
+
+    missing_assets = [
+        base_asset
+        for base_asset, _ in CURRENCY_RATE_SOURCES.values()
+        if base_asset not in tickers_by_asset
+    ]
+    if missing_assets:
+        raise ValueError(f"В bcs_market_data не найдены фьючерсы: {', '.join(missing_assets)}")
+
     timeout = aiohttp.ClientTimeout(total=15)
     connector = aiohttp.TCPConnector(ssl=ssl.create_default_context(cafile=certifi.where()))
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-        async with session.get(CBR_DAILY_RATES_URL) as response:
-            response.raise_for_status()
-            payload = await response.read()
+        pages = {}
+        for currency_code, (base_asset, _) in CURRENCY_RATE_SOURCES.items():
+            async with session.get(MOEX_CONTRACT_URL.format(ticker=tickers_by_asset[base_asset])) as response:
+                response.raise_for_status()
+                pages[currency_code] = await response.text()
 
-    root = ET.fromstring(payload)
-    rate_date = datetime.strptime(root.attrib["Date"], "%d.%m.%Y").date()
+    rate_date = date.today()
     rates: list[tuple[str, Decimal, int, date]] = []
-    for node in root.findall("Valute"):
-        currency_code = node.findtext("CharCode")
-        if currency_code not in CBR_CURRENCIES:
-            continue
-        nominal = int(node.findtext("Nominal", "0"))
-        value = _as_decimal(node.findtext("Value", "").replace(",", "."))
-        if nominal <= 0 or value is None or value <= 0:
-            continue
-        rates.append((currency_code, value / nominal, nominal, rate_date))
+    for currency_code, (_, multiplier) in CURRENCY_RATE_SOURCES.items():
+        step_price = _moex_step_price(pages[currency_code])
+        if step_price is None or step_price <= 0:
+            raise ValueError(f"MOEX не вернула стоимость шага цены для {currency_code}")
+        rates.append((currency_code, step_price * multiplier, 1, rate_date))
 
-    if {rate[0] for rate in rates} != CBR_CURRENCIES:
-        raise ValueError("ЦБ РФ не вернул курсы USD и CNY")
-
-    pool = await create_pool()
     async with pool.acquire() as connection:
         await connection.executemany(
             """
@@ -440,12 +466,12 @@ async def _refresh_cbr_rates() -> list[dict[str, object]]:
             WHERE currency_code = ANY($1::varchar[])
             ORDER BY currency_code
             """,
-            list(CBR_CURRENCIES),
+            list(CURRENCY_RATE_SOURCES),
         )
     return [dict(row) for row in rows]
 
 
-async def _get_cbr_rates() -> list[dict[str, object]]:
+async def _get_currency_rates() -> list[dict[str, object]]:
     """Вернуть последние сохранённые курсы без внепланового обновления."""
     pool = await create_pool()
     async with pool.acquire() as connection:
@@ -456,13 +482,13 @@ async def _get_cbr_rates() -> list[dict[str, object]]:
             WHERE currency_code = ANY($1::varchar[])
             ORDER BY currency_code
             """,
-            list(CBR_CURRENCIES),
+            list(CURRENCY_RATE_SOURCES),
         )
     return [dict(row) for row in rows]
 
 
 async def _refresh_arbitrage_metrics() -> bool:
-    """Пересчитать показатели всех пар с выбранным официальным курсом ЦБ РФ."""
+    """Пересчитать показатели всех пар с последними сохранёнными курсами."""
     pool = await create_pool()
     async with pool.acquire() as connection:
         rows = await connection.fetch(
@@ -474,10 +500,10 @@ async def _refresh_arbitrage_metrics() -> bool:
             """
         )
 
-    cbr_rates = await _get_cbr_rates()
+    currency_rates = await _get_currency_rates()
     rates_by_currency = {
         str(rate["currency_code"]): _as_decimal(rate["rate"])
-        for rate in cbr_rates
+        for rate in currency_rates
     }
     if not rates_by_currency:
         return False
@@ -622,20 +648,6 @@ def _seconds_until_reference_sync() -> float:
     return (scheduled - now).total_seconds()
 
 
-def _seconds_until_cbr_rate_sync() -> float:
-    """Рассчитать задержку до ближайшего обновления в 03:01 по Москве."""
-    now = datetime.now(MOSCOW_TIMEZONE)
-    scheduled = now.replace(
-        hour=CBR_RATE_SYNC_HOUR_MSK,
-        minute=CBR_RATE_SYNC_MINUTE_MSK,
-        second=0,
-        microsecond=0,
-    )
-    if scheduled <= now:
-        scheduled += timedelta(days=1)
-    return (scheduled - now).total_seconds()
-
-
 async def _sync_reference_data_periodically() -> None:
     """Обновлять справочники BCS и EXANTE каждый день в 03:00 UTC."""
     while True:
@@ -689,25 +701,25 @@ async def _stop_forts_margin_sync() -> None:
         _forts_margin_sync_task = None
 
 
-async def _sync_cbr_rates_periodically() -> None:
-    """Обновлять сохранённые официальные курсы ЦБ РФ раз в сутки в 03:01 МСК."""
+async def _sync_currency_rates_periodically() -> None:
+    """Обновлять курсы по фьючерсам MOEX сразу и затем каждые шесть часов."""
     while True:
-        await asyncio.sleep(_seconds_until_cbr_rate_sync())
         try:
-            rates = await _refresh_cbr_rates()
-            print(f"Курсы ЦБ РФ обновлены: {len(rates)} валют.", flush=True)
+            rates = await _refresh_currency_rates()
+            print(f"Курсы MOEX обновлены: {len(rates)} валют.", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            print(f"Ошибка обновления курсов ЦБ РФ: {error}", flush=True)
+            print(f"Ошибка обновления курсов MOEX: {error}", flush=True)
+        await asyncio.sleep(CURRENCY_RATE_SYNC_INTERVAL_SECONDS)
 
 
-async def _stop_cbr_rate_sync() -> None:
-    global _cbr_rate_sync_task
-    if _cbr_rate_sync_task is not None:
-        _cbr_rate_sync_task.cancel()
-        await asyncio.gather(_cbr_rate_sync_task, return_exceptions=True)
-        _cbr_rate_sync_task = None
+async def _stop_currency_rate_sync() -> None:
+    global _currency_rate_sync_task
+    if _currency_rate_sync_task is not None:
+        _currency_rate_sync_task.cancel()
+        await asyncio.gather(_currency_rate_sync_task, return_exceptions=True)
+        _currency_rate_sync_task = None
 
 
 async def get_current_user(
@@ -728,7 +740,7 @@ async def get_current_user(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Жизненный цикл приложения: инициализация / cleanup."""
-    global _reference_sync_task, _forts_margin_sync_task, _cbr_rate_sync_task
+    global _reference_sync_task, _forts_margin_sync_task, _currency_rate_sync_task
     await initialize_database()
     await _restart_market_subscriptions()
     # Планировщики стартуют вместе с API и ждут ближайшего времени запуска.
@@ -738,11 +750,11 @@ async def lifespan(_: FastAPI):
     _forts_margin_sync_task = asyncio.create_task(
         _sync_forts_margins_periodically(), name="forts-margin-sync"
     )
-    _cbr_rate_sync_task = asyncio.create_task(
-        _sync_cbr_rates_periodically(), name="cbr-rate-sync"
+    _currency_rate_sync_task = asyncio.create_task(
+        _sync_currency_rates_periodically(), name="currency-rate-sync"
     )
     yield
-    await _stop_cbr_rate_sync()
+    await _stop_currency_rate_sync()
     await _stop_forts_margin_sync()
     await _stop_reference_data_sync()
     await _stop_market_subscriptions()
@@ -809,7 +821,7 @@ async def list_arbitrage_pairs(_: str = Depends(get_current_user)):
 
 @app.get("/api/currency-rates")
 async def list_currency_rates(_: str = Depends(get_current_user)):
-    return {"source": "ЦБ РФ", "rates": await _get_cbr_rates()}
+    return {"source": "MOEX", "rates": await _get_currency_rates()}
 
 
 @app.get("/api/arbitrage-pairs/events")

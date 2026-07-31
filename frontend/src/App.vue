@@ -46,8 +46,8 @@
           </form>
         </section>
         <p v-if="tableError" class="form-error table-error">{{ tableError }}</p>
-        <section class="currency-rates" aria-label="Официальные курсы ЦБ РФ">
-          <div class="currency-rates-title"><span>КУРСЫ ЦБ РФ</span><small>официальный курс за {{ currencyRateDate }}</small></div>
+        <section class="currency-rates" aria-label="Курсы MOEX">
+          <div class="currency-rates-title"><span>КУРСЫ MOEX</span><small>расчётный курс за {{ currencyRateDate }}</small></div>
           <div class="currency-rate" v-for="rate in currencyRates" :key="rate.currency_code"><strong>{{ rate.currency_code }}/RUB</strong><span>{{ formatNumber(rate.rate, 4) }} RUB</span></div>
           <span v-if="!currencyRates.length" class="currency-rates-empty">Курсы пока недоступны</span>
         </section>

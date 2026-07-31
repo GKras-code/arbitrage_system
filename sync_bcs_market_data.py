@@ -17,10 +17,20 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     short_name TEXT,
     instrument_type TEXT NOT NULL,
     minimum_step NUMERIC,
+    step_price NUMERIC,
+    step_price_currency TEXT,
+    base_asset TEXT,
     maturity_date DATE,
     lot_size NUMERIC,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
+"""
+
+ALTER_TABLE_SQL = f"""
+ALTER TABLE {TABLE_NAME}
+    ADD COLUMN IF NOT EXISTS step_price NUMERIC,
+    ADD COLUMN IF NOT EXISTS step_price_currency TEXT,
+    ADD COLUMN IF NOT EXISTS base_asset TEXT
 """
 
 INSERT_SQL = f"""
@@ -29,10 +39,13 @@ INSERT INTO {TABLE_NAME} (
     short_name,
     instrument_type,
     minimum_step,
+    step_price,
+    step_price_currency,
+    base_asset,
     maturity_date,
     lot_size
 )
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 """
 
 
@@ -70,6 +83,9 @@ def _to_row(instrument: dict[str, Any]) -> tuple[Any, ...] | None:
         str(instrument.get("shortName") or "").strip() or None,
         str(instrument.get("instrumentType") or instrument.get("type") or "").strip(),
         _decimal(instrument.get("minimumStep")),
+        _decimal(instrument.get("stepPrice") or instrument.get("step_price")),
+        str(instrument.get("stepPriceCurrency") or instrument.get("step_price_currency") or "").strip() or None,
+        str(instrument.get("baseAsset") or instrument.get("base_asset") or "").strip() or None,
         _date(instrument.get("maturityDate")),
         _decimal(instrument.get("lotSize")),
     )
@@ -106,6 +122,7 @@ async def sync_market_data() -> int:
         async with pool.acquire() as connection:
             async with connection.transaction():
                 await connection.execute(CREATE_TABLE_SQL)
+                await connection.execute(ALTER_TABLE_SQL)
                 await connection.execute(f"DELETE FROM {TABLE_NAME}")
                 await connection.executemany(INSERT_SQL, rows)
     finally:
