@@ -78,15 +78,12 @@ class LoginRequest(BaseModel):
 class PairCreateRequest(BaseModel):
     cme_name: str = Field(min_length=1, max_length=100)
     forts_name: str = Field(min_length=0, max_length=100, default="")
+    trade_lot_currency: Literal["USD", "CNY"] = "USD"
 
 
 class PairManualValueUpdate(BaseModel):
     field: Literal["virt_0", "price_ratio", "cme_margin_usd"]
     value: Decimal
-
-
-class PairTradeLotCurrencyUpdate(BaseModel):
-    currency: Literal["USD", "CNY"]
 
 
 def password_hash(password: str) -> str:
@@ -889,9 +886,14 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
                     )
 
             row = await connection.fetchrow(
-                "INSERT INTO arbitrage_pairs (cme_name, forts_name) VALUES ($1, $2) RETURNING id",
+                """
+                INSERT INTO arbitrage_pairs (cme_name, forts_name, trade_lot_currency)
+                VALUES ($1, $2, $3)
+                RETURNING id
+                """,
                 exante_symbol_id,
                 bcs_ticker or None,
+                request.trade_lot_currency,
             )
     except HTTPException:
         raise
@@ -997,32 +999,6 @@ async def update_pair_manual_value(
     await _refresh_arbitrage_metrics()
     await _publish_price_update()
     return {"id": row["id"], "field": request.field, "value": row["value"]}
-
-
-@app.patch("/api/arbitrage-pairs/{pair_id}/trade-lot-currency")
-async def update_pair_trade_lot_currency(
-    pair_id: int,
-    request: PairTradeLotCurrencyUpdate,
-    _: str = Depends(get_current_user),
-):
-    """Выбрать валюту официального курса ЦБ РФ для расчёта пары."""
-    pool = await create_pool()
-    async with pool.acquire() as connection:
-        row = await connection.fetchrow(
-            """
-            UPDATE arbitrage_pairs
-            SET trade_lot_currency = $1
-            WHERE id = $2
-            RETURNING id, trade_lot_currency
-            """,
-            request.currency,
-            pair_id,
-        )
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пара не найдена")
-    await _refresh_arbitrage_metrics()
-    await _publish_price_update()
-    return {"id": row["id"], "trade_lot_currency": row["trade_lot_currency"]}
 
 
 @app.get("/api/instrument-options")

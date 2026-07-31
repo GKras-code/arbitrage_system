@@ -27,13 +27,21 @@
           <div><p class="section-label">НОВАЯ ПАРА</p><span>Выберите контракты из синхронизированных справочников EXANTE и BCS.</span></div>
           <form class="add-pair-form" @submit.prevent="addPair">
             <div class="pair-fields">
-              <label class="pair-select">EXANTE / CME ticker
+              <label class="pair-select pair-select--cme"><span class="pair-select-label">EXANTE / CME ticker</span>
                 <input v-model="newCmeName" list="exante-options" placeholder="Например AAPL.NASDAQ" maxlength="100" required @focus="scheduleInstrumentSearch('exante', newCmeName)" @input="scheduleInstrumentSearch('exante', newCmeName)" />
                 <small class="pair-hint">{{ exanteHint }}</small>
               </label>
-              <label class="pair-select">BCS / FORTS ticker
+              <label class="pair-select pair-select--forts"><span class="pair-select-label">BCS / FORTS ticker</span>
                 <input v-model="newFortsName" list="bcs-options" placeholder="Например SBER" maxlength="100" @focus="scheduleInstrumentSearch('bcs', newFortsName)" @input="scheduleInstrumentSearch('bcs', newFortsName)" />
                 <small class="pair-hint">{{ bcsHint }}</small>
+              </label>
+              <label class="pair-select pair-select--currency"><span class="pair-select-label">Trade lot currency</span>
+                <span class="pair-currency-control">
+                  <select v-model="newTradeLotCurrency" class="pair-currency-select" aria-label="Валюта расчёта Trade lot">
+                    <option value="USD">USD</option>
+                    <option value="CNY">CNY</option>
+                  </select>
+                </span>
               </label>
               <datalist id="exante-options">
                 <option v-for="option in exanteOptions" :key="`exante-${option.value}`" :value="option.value">{{ option.label }}</option>
@@ -72,7 +80,7 @@
               <td v-if="showContractDetails">{{ formatNumber(pair.forts_price_step, 8) }}</td>
               <td v-if="showContractDetails">{{ formatNumber(pair.forts_price_step_value, 8) }}</td>
               <td v-if="showContractDetails">{{ formatNumber(pair.forts_trade_lot, 4) }}</td>
-              <td v-if="showContractDetails"><select class="trade-lot-currency" :value="pair.trade_lot_currency" :disabled="updatingCurrencyPairId === pair.id" :aria-label="`Валюта расчёта Trade lot для ${pair.cme_name}`" @change="updateTradeLotCurrency(pair, $event.target.value)"><option value="USD">USD</option><option value="CNY">CNY</option></select></td>
+              <td v-if="showContractDetails">{{ pair.trade_lot_currency }}</td>
               <td>{{ pair.dte ?? '—' }}</td>
               <td class="editable-cell" :class="[numberClass(pair.virt_0), { 'is-invalid': isInvalidCell(pair.id, 'virt_0') }]" @click="startCellEdit(pair, 'virt_0')"><input v-if="isEditingCell(pair.id, 'virt_0')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveCellEdit(pair)" @keydown.enter.prevent="saveCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.virt_0) }}</span></td>
               <td :class="numberClass(pair.diff)">{{ formatExactNumber(pair.diff) }}</td>
@@ -104,6 +112,7 @@ const sortColumn = ref(null)
 const sortDirection = ref('desc')
 const newCmeName = ref('')
 const newFortsName = ref('')
+const newTradeLotCurrency = ref('USD')
 const exanteOptions = ref([])
 const bcsOptions = ref([])
 const exanteHint = ref('Начните вводить тикер или symbolId EXANTE.')
@@ -116,7 +125,6 @@ const editorInput = ref(null)
 const invalidCells = ref({})
 const showContractDetails = ref(false)
 const deletingPairId = ref(null)
-const updatingCurrencyPairId = ref(null)
 let priceEvents = null
 let priceRefreshTimer = null
 
@@ -166,10 +174,10 @@ function connectPriceEvents() {
 async function addPair() {
   addingPair.value = true; tableError.value = ''
   try {
-    const response = await fetch('/api/arbitrage-pairs', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ cme_name: newCmeName.value, forts_name: newFortsName.value }) })
+    const response = await fetch('/api/arbitrage-pairs', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ cme_name: newCmeName.value, forts_name: newFortsName.value, trade_lot_currency: newTradeLotCurrency.value }) })
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || 'Не удалось добавить пару')
-    newCmeName.value = ''; newFortsName.value = ''; await loadPairs()
+    newCmeName.value = ''; newFortsName.value = ''; newTradeLotCurrency.value = 'USD'; await loadPairs()
   } catch (error) { tableError.value = error.message } finally { addingPair.value = false }
 }
 async function deletePair(pair) {
@@ -190,27 +198,6 @@ async function deletePair(pair) {
     tableError.value = error.message || 'Не удалось удалить пару'
   } finally {
     deletingPairId.value = null
-  }
-}
-async function updateTradeLotCurrency(pair, currency) {
-  if (currency === pair.trade_lot_currency) return
-  updatingCurrencyPairId.value = pair.id
-  tableError.value = ''
-  try {
-    const response = await fetch(`/api/arbitrage-pairs/${pair.id}/trade-lot-currency`, {
-      method: 'PATCH',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ currency }),
-    })
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.detail || 'Не удалось сохранить валюту расчёта')
-    pair.trade_lot_currency = data.trade_lot_currency
-    await loadPairs(false)
-  } catch (error) {
-    tableError.value = error.message || 'Не удалось сохранить валюту расчёта'
-    await loadPairs(false)
-  } finally {
-    updatingCurrencyPairId.value = null
   }
 }
 function cellKey(pairId, field) { return `${pairId}:${field}` }
@@ -333,4 +320,21 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .currency-rates { display: flex; align-items: stretch; margin-bottom: 18px; border: 1px solid #35423d; background: #161d1a; font: 11px 'IBM Plex Mono', monospace; } .currency-rates-title, .currency-rate { display: flex; flex-direction: column; justify-content: center; padding: 12px 16px; border-right: 1px solid #35423d; } .currency-rates-title { min-width: 215px; color: #77d6b6; letter-spacing: .6px; } .currency-rates-title small, .currency-rates-empty { margin-top: 4px; color: #7f8d86; font-size: 10px; letter-spacing: 0; } .currency-rate { min-width: 150px; gap: 4px; } .currency-rate strong { color: #aeb9b3; font-weight: 500; } .currency-rate span { color: #e4eee9; font-size: 13px; font-weight: 600; } .currency-rates-empty { align-self: center; margin: 0; padding: 0 16px; }
 .table-toolbar { align-items: center; gap: 12px; padding: 10px 12px; } .table-toolbar-actions { display: flex; align-items: center; gap: 12px; } .details-toggle { border: 1px solid #46574f; border-radius: 2px; padding: 6px 8px; color: #b9c7c0; background: #19211e; font: 10px 'IBM Plex Mono', monospace; } .details-toggle:hover { border-color: #77d6b6; color: #e7f4ed; } th, td { text-align: center !important; } th { padding: 9px 8px; line-height: 1.25; } .header-label { display: inline-block; } .sort-header { display: inline-flex; align-items: center; justify-content: center; gap: 3px; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; text-align: inherit; } .sort-header:hover, .sort-header:focus-visible, .sort-header.is-active { color: #77d6b6; } .sort-header:focus-visible { outline: 1px solid #77d6b6; outline-offset: 3px; } table.is-compact { min-width: 920px; table-layout: fixed; } .contract-column { width: 14%; } .date-column { width: 9%; } .price-column, .ratio-column { width: 8%; } .dte-column, .percent-column { width: 5%; } .virt-column, .diff-column { width: 7%; } .ytm-column { width: 6%; } .action-column { width: 4%; } td { max-width: 132px; padding: 10px 8px; } .instrument { display: block; max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; } .editable-cell input { min-width: 64px; margin: -5px 0; padding: 5px 6px; } .trade-lot-currency { border: 1px solid #46574f; border-radius: 2px; padding: 5px 6px; color: #dbe4df; background: #19211e; font: inherit; } .trade-lot-currency:focus { border-color: #77d6b6; outline: none; } .trade-lot-currency:disabled { cursor: wait; opacity: .6; } .pair-action { padding: 0 4px; } .delete-pair-button { width: 24px; height: 24px; border: 1px solid transparent; border-radius: 2px; padding: 0; color: #87958e; background: transparent; font: 500 18px/1 'IBM Plex Mono', monospace; } .delete-pair-button:hover:not(:disabled) { border-color: #a85850; color: #ff9989; background: rgba(158, 54, 44, .18); } .delete-pair-button:disabled { cursor: wait; opacity: .45; }
 @media (max-width: 700px) { .topbar, .dashboard-heading, .add-pair-row { align-items: flex-start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: space-between; } .workspace { padding: 30px 14px; } .heading-metrics { width: 100%; } .add-pair-form { width: 100%; flex-direction: column; } .pair-fields { width: 100%; flex-direction: column; } .pair-select { width: 100%; } .add-pair-form .primary-button { width: 100%; } .currency-rates { flex-wrap: wrap; } .currency-rates-title { width: 100%; min-width: 0; border-bottom: 1px solid #35423d; } .currency-rate { flex: 1; min-width: 0; } .currency-rate:last-of-type { border-right: 0; } .login-panel { padding: 28px 23px; } }
+.add-pair-form { width: min(100%, 620px); }
+.pair-fields { align-items: flex-start; }
+.pair-select { flex: 0 1 170px; }
+.pair-select--cme { flex-basis: 190px; }
+.pair-select--forts { flex-basis: 170px; }
+.pair-select--currency { flex: 0 0 130px; }
+.pair-select { display: grid; grid-template-rows: 14px 40px minmax(15px, auto); gap: 7px; }
+.pair-select-label { overflow: hidden; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.pair-select input, .pair-currency-select { height: 40px; }
+.pair-select input { margin-top: 0; padding: 0 12px; }
+.pair-select .pair-hint { margin-top: 0; }
+.pair-currency-control { display: block; position: relative; margin-top: 0; }
+.pair-currency-control::after { content: ''; position: absolute; top: 50%; right: 14px; width: 6px; height: 6px; border-right: 1px solid #aeb9b3; border-bottom: 1px solid #aeb9b3; pointer-events: none; transform: translateY(-70%) rotate(45deg); }
+.pair-currency-select { width: 100%; appearance: none; border: 1px solid #3b4742; border-radius: 2px; padding: 0 32px 0 12px; color: #eef6f1; background: #101514; cursor: pointer; }
+.pair-currency-select:focus { border-color: #77d6b6; outline: none; }
+.add-pair-form .primary-button { align-self: flex-start; height: 40px; margin-top: 21px; padding: 0 16px; }
+@media (max-width: 700px) { .add-pair-form .primary-button { margin-top: 0; } }
 </style>
