@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
 from urllib.parse import quote
 
@@ -16,6 +16,7 @@ from db import create_pool
 ISS_SECURITY_URL = "https://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}.json"
 REQUEST_TIMEOUT_SECONDS = 15
 MAX_CONCURRENT_REQUESTS = 10
+MAX_CURRENCY_STEP_DIVISOR_POWER = 12
 
 
 def _security_decimal(payload: dict, column_name: str) -> Decimal | None:
@@ -33,6 +34,28 @@ def _security_decimal(payload: dict, column_name: str) -> Decimal | None:
     except (IndexError, InvalidOperation, ValueError):
         return None
     return result if result.is_finite() and result >= 0 else None
+
+
+def _restore_step_price_precision(
+    step_price: Decimal | None,
+    currency_rate: Decimal | None,
+) -> Decimal | None:
+    """Восстановить знаки STEPPRICE, усечённые MOEX при пересчёте через валютный курс."""
+    if (
+        step_price is None
+        or currency_rate is None
+        or step_price <= 0
+        or currency_rate <= 0
+    ):
+        return step_price
+
+    decimal_places = max(0, -step_price.as_tuple().exponent)
+    precision = Decimal(1).scaleb(-decimal_places)
+    for power in range(1, MAX_CURRENCY_STEP_DIVISOR_POWER + 1):
+        precise_step_price = currency_rate / (Decimal(10) ** power)
+        if precise_step_price.quantize(precision, rounding=ROUND_HALF_UP) == step_price:
+            return precise_step_price
+    return step_price
 
 
 async def _fetch_market_parameters(
@@ -89,13 +112,37 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
     if not updates:
         return 0
 
+    parameters_by_ticker = {
+        ticker: (margin, step_price)
+        for margin, step_price, ticker in updates
+    }
     async with pool.acquire() as connection:
+        pairs = await connection.fetch(
+            """
+            SELECT pairs.id, pairs.forts_name, pairs.trade_lot_currency,
+                   rates.rate AS currency_rate
+            FROM arbitrage_pairs AS pairs
+            LEFT JOIN currency_rates AS rates
+                ON rates.currency_code = pairs.trade_lot_currency
+            WHERE pairs.forts_name = ANY($1::varchar[])
+            """,
+            list(parameters_by_ticker),
+        )
+        pair_updates = [
+            (
+                margin,
+                _restore_step_price_precision(step_price, row["currency_rate"]),
+                row["id"],
+            )
+            for row in pairs
+            for margin, step_price in [parameters_by_ticker[str(row["forts_name"])]]
+        ]
         await connection.executemany(
             "UPDATE arbitrage_pairs "
             "SET forts_margin_rub = COALESCE($1, forts_margin_rub), "
             "forts_price_step_value = COALESCE($2, forts_price_step_value) "
-            "WHERE forts_name = $3",
-            updates,
+            "WHERE id = $3",
+            pair_updates,
         )
     return len(updates)
 
