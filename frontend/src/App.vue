@@ -127,6 +127,9 @@ const showContractDetails = ref(false)
 const deletingPairId = ref(null)
 let priceEvents = null
 let priceRefreshTimer = null
+let priceRefreshPending = false
+let lastPriceRefresh = 0
+const PRICE_REFRESH_INTERVAL = 1500
 
 function authHeaders() { return { Authorization: `Bearer ${token.value}` } }
 async function login() {
@@ -166,10 +169,24 @@ async function loadCurrencyRates() {
 function connectPriceEvents() {
   priceEvents?.close()
   priceEvents = new EventSource(`/api/arbitrage-pairs/events?token=${encodeURIComponent(token.value)}`)
-  priceEvents.onmessage = () => {
-    if (priceRefreshTimer) return
-    priceRefreshTimer = setTimeout(() => { priceRefreshTimer = null; loadPairs(false) }, 100)
+  priceEvents.onmessage = schedulePriceRefresh
+}
+function schedulePriceRefresh() {
+  const now = Date.now()
+  const remaining = lastPriceRefresh + PRICE_REFRESH_INTERVAL - now
+  if (remaining <= 0) {
+    lastPriceRefresh = now
+    loadPairs(false)
+    return
   }
+  if (priceRefreshPending) return
+  priceRefreshPending = true
+  priceRefreshTimer = setTimeout(() => {
+    priceRefreshPending = false
+    priceRefreshTimer = null
+    lastPriceRefresh = Date.now()
+    loadPairs(false)
+  }, remaining)
 }
 async function addPair() {
   addingPair.value = true; tableError.value = ''
