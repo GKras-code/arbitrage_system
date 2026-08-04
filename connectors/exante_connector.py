@@ -890,12 +890,6 @@ class EXANTEConnector:
         if on_data is None:
             on_data = lambda d: logger.info("EXANTE %s: %s", stream_name, d)
 
-        await self.ensure_token()
-        headers = {
-            "Accept": "application/x-json-stream",
-            **self._build_auth_headers(),
-        }
-
         buffer: list[dict] = []
         stream_session: aiohttp.ClientSession | None = None
 
@@ -913,6 +907,11 @@ class EXANTEConnector:
                     timeout=timeout, connector=tcp_connector
                 )
 
+                await self.ensure_token()
+                headers = {
+                    "Accept": "application/x-json-stream",
+                    **self._build_auth_headers(),
+                }
                 qs = "&".join(f"{k}={v}" for k, v in params.items())
                 full_url = f"{url}?{qs}"
                 async with stream_session.get(
@@ -938,7 +937,19 @@ class EXANTEConnector:
                                 batch = list(buffer)
                                 buffer.clear()
                                 for item in batch:
-                                    await self._call_handler(on_data, item)
+                                    try:
+                                        await self._call_handler(on_data, item)
+                                    except Exception:
+                                        logger.exception(
+                                            "EXANTE %s handler error; update skipped",
+                                            stream_name,
+                                        )
+
+                logger.warning(
+                    "EXANTE %s stream closed by server; reconnecting in 5s",
+                    stream_name,
+                )
+                await asyncio.sleep(5)
 
             except asyncio.CancelledError:
                 logger.info("EXANTE %s stream cancelled", stream_name)

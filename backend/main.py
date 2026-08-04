@@ -580,9 +580,10 @@ def _mid_price(bid: object, ask: object) -> Decimal | None:
         return value
 
     try:
-        return (Decimal(str(price(bid))) + Decimal(str(price(ask)))) / 2
+        midpoint = (Decimal(str(price(bid))) + Decimal(str(price(ask)))) / 2
     except (InvalidOperation, TypeError, ValueError):
         return None
+    return midpoint if midpoint.is_finite() else None
 
 
 async def _stream_bcs_prices(instruments: list[dict[str, str]]) -> None:
