@@ -570,13 +570,32 @@ async def _save_market_price(column: str, instrument: str, price: object) -> Non
         await _publish_price_update()
 
 
+def _mid_price(bid: object, ask: object) -> Decimal | None:
+    """Return the midpoint of the best bid and ask, if both are available."""
+    def price(value: object) -> object:
+        if isinstance(value, dict):
+            return value.get("price")
+        if isinstance(value, list):
+            return price(value[0]) if value else None
+        return value
+
+    try:
+        return (Decimal(str(price(bid))) + Decimal(str(price(ask)))) / 2
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
 async def _stream_bcs_prices(instruments: list[dict[str, str]]) -> None:
-    """Receive BCS quote updates and persist the `last` price."""
+    """Receive BCS quote updates and persist their bid/ask midpoint."""
     connector = BCSConnector()
     try:
         async def on_quote(quote: dict) -> None:
             if quote.get("responseType") == "Quotes":
-                await _save_market_price("forts_price", str(quote.get("ticker") or ""), quote.get("last"))
+                await _save_market_price(
+                    "forts_price",
+                    str(quote.get("ticker") or ""),
+                    _mid_price(quote.get("bid"), quote.get("offer")),
+                )
 
         await connector.stream_quotes(instruments, on_quote)
     finally:
@@ -584,13 +603,17 @@ async def _stream_bcs_prices(instruments: list[dict[str, str]]) -> None:
 
 
 async def _stream_exante_prices(symbol_ids: list[str]) -> None:
-    """Receive EXANTE trade updates and persist the `price` field."""
+    """Receive EXANTE best-quote updates and persist their bid/ask midpoint."""
     connector = EXANTEConnector()
     try:
-        async def on_trade(trade: dict) -> None:
-            await _save_market_price("cme_price", str(trade.get("symbolId") or ""), trade.get("price"))
+        async def on_quote(quote: dict) -> None:
+            await _save_market_price(
+                "cme_price",
+                str(quote.get("symbolId") or ""),
+                _mid_price(quote.get("bid"), quote.get("ask")),
+            )
 
-        await connector.stream_trades(symbol_ids, on_trade, buffer_size=1)
+        await connector.stream_best_quotes(symbol_ids, on_quote, buffer_size=1)
     finally:
         await connector.close()
 
