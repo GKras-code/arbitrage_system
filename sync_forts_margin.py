@@ -125,6 +125,7 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
             LEFT JOIN currency_rates AS rates
                 ON rates.currency_code = pairs.trade_lot_currency
             WHERE pairs.forts_name = ANY($1::varchar[])
+            ORDER BY pairs.id
             """,
             list(parameters_by_ticker),
         )

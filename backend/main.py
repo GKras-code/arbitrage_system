@@ -94,6 +94,37 @@ def _normalize_option(value: str, label: str, details: str = "") -> dict[str, st
     return {"value": value, "label": label, "details": details}
 
 
+_FUTURES_MONTH_CODES = {
+    "F": "Январь", "G": "Февраль", "H": "Март", "J": "Апрель",
+    "K": "Май", "M": "Июнь", "N": "Июль", "Q": "Август",
+    "U": "Сентябрь", "V": "Октябрь", "X": "Ноябрь", "Z": "Декабрь",
+}
+
+
+def _forts_expiration_label(ticker: str, maturity_date) -> str:
+    """Расшифровать срок фьючерса FORTS вида BTQ6 в «Август 2026»."""
+    if maturity_date:
+        try:
+            if hasattr(maturity_date, "month") and hasattr(maturity_date, "year"):
+                month_name = [
+                    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+                ][maturity_date.month - 1]
+                return f"{month_name} {maturity_date.year}"
+            return str(maturity_date)
+        except Exception:
+            pass
+    # BTQ6 → месяц Q (4-й символ), год 2026 (две последние цифры)
+    clean = str(ticker or "").upper().strip()
+    if len(clean) >= 4 and clean[2] in _FUTURES_MONTH_CODES:
+        try:
+            year = 2000 + int(clean[3:])
+            return f"{_FUTURES_MONTH_CODES[clean[2]]} {year}"
+        except ValueError:
+            pass
+    return ""
+
+
 def _unique_options(items: list[dict[str, str]], limit: int) -> list[dict[str, str]]:
     unique: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -108,11 +139,74 @@ def _unique_options(items: list[dict[str, str]], limit: int) -> list[dict[str, s
     return unique
 
 
-def _matches_query(*values: str, query: str) -> bool:
+def _match_rank(value: str, query: str) -> int | None:
+    """Оценить соответствие значения запросу (меньше — лучше; None — не подходит).
+
+    Запрос, содержащий точку, обрабатывается посегментно, поэтому ввод «ng.»
+    или «ng.nym» не найдёт «MNG.*» — подстрока для таких запросов не учитывается.
+    """
     if not query:
-        return True
+        return 0
+    value_folded = value.casefold()
     query_folded = query.casefold()
-    return any(query_folded in value.casefold() for value in values if value)
+    if value_folded == query_folded:
+        return 0
+    if value_folded.startswith(query_folded):
+        return 1
+    value_parts = value_folded.split(".")
+    query_parts = query_folded.split(".")
+    has_dot = "." in query_folded
+    if len(query_parts) <= len(value_parts) and all(
+        (not part) or value_parts[index].startswith(part)
+        for index, part in enumerate(query_parts)
+    ):
+        return 2
+    if has_dot:
+        return None
+    if any(part.startswith(query_folded) for part in value_parts):
+        return 3
+    if query_folded in value_folded:
+        return 4
+    return None
+
+
+def _row_rank(value: str, ticker: str, short_name: str, query: str) -> int | None:
+    """Наилучший ранг соответствия по всем полям инструмента."""
+    best: int | None = None
+    for candidate in (value, ticker, short_name):
+        if not candidate:
+            continue
+        rank = _match_rank(candidate, query)
+        if rank is not None and (best is None or rank < best):
+            best = rank
+    return best
+
+
+_option_rows_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+async def _load_option_rows(table_name: str, value_column: str) -> list[dict]:
+    """Загрузить (с кэшем) все строки справочника инструментов."""
+    cached = _option_rows_cache.get(table_name)
+    if cached is not None:
+        created_at, rows = cached
+        if monotonic() - created_at <= REFERENCE_CACHE_TTL_SECONDS:
+            return rows
+        _option_rows_cache.pop(table_name, None)
+
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            f"""
+            SELECT {value_column} AS value, ticker, short_name, instrument_type,
+                   maturity_date
+            FROM {table_name}
+            WHERE COALESCE({value_column}, '') <> ''
+            """
+        )
+    loaded = [dict(row) for row in rows]
+    _option_rows_cache[table_name] = (monotonic(), loaded)
+    return loaded
 
 
 async def _market_data_options(
@@ -122,46 +216,58 @@ async def _market_data_options(
     limit: int,
     provider_label: str,
 ) -> list[dict[str, str]]:
-    """Найти инструменты в синхронизированном справочнике провайдера."""
-    pool = await create_pool()
+    """Найти инструменты в синхронизированном справочнике провайдера.
+
+    Поиск выполняется в памяти: составные тикеры (например NG.NYMEX.M2036)
+    ранжируются посегментно, а при наличии точки в запросе substring-совпадения
+    отбрасываются, чтобы «MNG.*» не попадал в выдачу для «ng.».
+    """
     try:
-        async with pool.acquire() as connection:
-            rows = await connection.fetch(
-                f"""
-                SELECT {value_column} AS value, ticker, short_name, instrument_type,
-                       maturity_date
-                FROM {table_name}
-                WHERE COALESCE({value_column}, '') <> ''
-                  AND (
-                      $1 = ''
-                      OR {value_column} ILIKE '%' || $1 || '%'
-                      OR COALESCE(ticker, '') ILIKE '%' || $1 || '%'
-                      OR COALESCE(short_name, '') ILIKE '%' || $1 || '%'
-                  )
-                ORDER BY {value_column}
-                LIMIT $2
-                """,
-                query.strip(),
-                limit,
-            )
+        rows = await _load_option_rows(table_name, value_column)
     except Exception:
         # Справочник может ещё не быть создан синхронизатором.
         return []
 
-    items: list[dict[str, str]] = []
+    normalized_query = query.strip()
+    ranked: list[tuple[int, str, dict]] = []
     for row in rows:
-        value = str(row["value"] or "").strip()
-        ticker = str(row["ticker"] or "").strip()
-        short_name = str(row["short_name"] or "").strip()
-        instrument_type = str(row["instrument_type"] or "").strip()
-        maturity_date = row["maturity_date"]
-        details = ", ".join(
-            part for part in (ticker, short_name, instrument_type) if part
-        ) or f"Инструмент {provider_label}"
-        if maturity_date:
-            details = f"{details}, exp {maturity_date}"
+        value = str(row.get("value") or "").strip()
+        ticker = str(row.get("ticker") or "").strip()
+        short_name = str(row.get("short_name") or "").strip()
+        rank = _row_rank(value, ticker, short_name, normalized_query)
+        if rank is None:
+            continue
+        ranked.append((rank, value.casefold(), row))
+
+    ranked.sort(key=lambda item: (item[0], item[1]))
+
+    items: list[dict[str, str]] = []
+    for _, _, row in ranked:
+        value = str(row.get("value") or "").strip()
+        ticker = str(row.get("ticker") or "").strip()
+        short_name = str(row.get("short_name") or "").strip()
+        instrument_type = str(row.get("instrument_type") or "").strip()
+        maturity_date = row.get("maturity_date")
+        is_forts = table_name == "bcs_market_data"
+        if is_forts:
+            # FORTS-тикер вида BTQ6: показываем понятное название и срок.
+            details_parts = [part for part in (short_name,) if part]
+            exp_label = _forts_expiration_label(value, maturity_date)
+            if exp_label:
+                details_parts.append(exp_label)
+            if instrument_type and instrument_type.upper() == "FUTURES":
+                details_parts.append("фьючерс")
+            details = " · ".join(details_parts) if details_parts else f"Инструмент {provider_label}"
+        else:
+            details = ", ".join(
+                part for part in (ticker, short_name, instrument_type) if part
+            ) or f"Инструмент {provider_label}"
+            if maturity_date:
+                details = f"{details}, exp {maturity_date}"
         label = value if value == ticker or not ticker else f"{value} ({ticker})"
         items.append(_normalize_option(value, label, details))
+        if len(items) >= limit:
+            break
     return _unique_options(items, limit)
 
 

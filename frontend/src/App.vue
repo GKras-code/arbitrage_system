@@ -27,12 +27,28 @@
           <div><p class="section-label">НОВАЯ ПАРА</p><span>Выберите контракты из синхронизированных справочников EXANTE и BCS.</span></div>
           <form class="add-pair-form" @submit.prevent="addPair">
             <div class="pair-fields">
-              <label class="pair-select pair-select--cme"><span class="pair-select-label">EXANTE / CME ticker</span>
-                <input v-model="newCmeName" list="exante-options" placeholder="Например AAPL.NASDAQ" maxlength="100" required @focus="scheduleInstrumentSearch('exante', newCmeName)" @input="scheduleInstrumentSearch('exante', newCmeName)" />
+              <label class="pair-select pair-select--cme combobox"><span class="pair-select-label">EXANTE / CME ticker</span>
+                <div class="combobox-control">
+                  <input ref="cmeInput" v-model="newCmeName" class="combobox-input" placeholder="Например NG.NYMEX.M2036" maxlength="100" autocomplete="off" required @focus="onCmeFocus" @input="onCmeInput" @keydown="onCmeKeydown" @blur="onCmeBlur" />
+                  <ul v-if="cmeOpen && cmeMatches.length" class="combobox-menu" role="listbox">
+                    <li v-for="(match, index) in cmeMatches" :key="match.value" role="option" :aria-selected="index === cmeHighlight" :class="{ 'is-active': index === cmeHighlight }" @mousedown.prevent="pickCme(match)" @mouseenter="cmeHighlight = index">
+                      <span class="combobox-value" v-html="highlightMatch(match.value, newCmeName)"></span>
+                      <span class="combobox-details">{{ match.details }}</span>
+                    </li>
+                  </ul>
+                </div>
                 <small class="pair-hint">{{ exanteHint }}</small>
               </label>
-              <label class="pair-select pair-select--forts"><span class="pair-select-label">BCS / FORTS ticker</span>
-                <input v-model="newFortsName" list="bcs-options" placeholder="Например SBER" maxlength="100" @focus="scheduleInstrumentSearch('bcs', newFortsName)" @input="scheduleInstrumentSearch('bcs', newFortsName)" />
+              <label class="pair-select pair-select--forts combobox"><span class="pair-select-label">BCS / FORTS ticker</span>
+                <div class="combobox-control">
+                  <input ref="fortsInput" v-model="newFortsName" class="combobox-input" placeholder="Например SBER" maxlength="100" autocomplete="off" @focus="onFortsFocus" @input="onFortsInput" @keydown="onFortsKeydown" @blur="onFortsBlur" />
+                  <ul v-if="fortsOpen && fortsMatches.length" class="combobox-menu" role="listbox">
+                    <li v-for="(match, index) in fortsMatches" :key="match.value" role="option" :aria-selected="index === fortsHighlight" :class="{ 'is-active': index === fortsHighlight }" @mousedown.prevent="pickForts(match)" @mouseenter="fortsHighlight = index">
+                      <span class="combobox-value" v-html="highlightMatch(match.value, newFortsName)"></span>
+                      <span class="combobox-details">{{ match.details }}</span>
+                    </li>
+                  </ul>
+                </div>
                 <small class="pair-hint">{{ bcsHint }}</small>
               </label>
               <label class="pair-select pair-select--currency"><span class="pair-select-label">Trade lot currency</span>
@@ -43,12 +59,6 @@
                   </select>
                 </span>
               </label>
-              <datalist id="exante-options">
-                <option v-for="option in exanteOptions" :key="`exante-${option.value}`" :value="option.value">{{ option.label }}</option>
-              </datalist>
-              <datalist id="bcs-options">
-                <option v-for="option in bcsOptions" :key="`bcs-${option.value}`" :value="option.value">{{ option.label }}</option>
-              </datalist>
             </div>
             <button class="primary-button" :disabled="addingPair">{{ addingPair ? 'Добавление...' : 'Добавить пару' }}</button>
           </form>
@@ -117,9 +127,20 @@ const exanteOptions = ref([])
 const bcsOptions = ref([])
 const exanteHint = ref('Начните вводить тикер или symbolId EXANTE.')
 const bcsHint = ref('Начните вводить тикер BCS.')
+const cmeOpen = ref(false)
+const cmeHighlight = ref(-1)
+const cmeMatches = ref([])
+const cmeTotal = ref(0)
+const cmeSuggestion = ref('')
+const cmeInput = ref(null)
+const fortsOpen = ref(false)
+const fortsHighlight = ref(-1)
+const fortsMatches = ref([])
+const fortsTotal = ref(0)
+const fortsSuggestion = ref('')
+const fortsInput = ref(null)
 const updatedAt = ref('—')
 const currencyRates = ref([])
-const searchTimers = { exante: null, bcs: null }
 const editingCell = ref(null)
 const editorInput = ref(null)
 const invalidCells = ref({})
@@ -190,8 +211,10 @@ function schedulePriceRefresh() {
 }
 async function addPair() {
   addingPair.value = true; tableError.value = ''
+  const cmeName = canonicalValue(exanteOptions, newCmeName.value)
+  const fortsName = canonicalValue(bcsOptions, newFortsName.value)
   try {
-    const response = await fetch('/api/arbitrage-pairs', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ cme_name: newCmeName.value, forts_name: newFortsName.value, trade_lot_currency: newTradeLotCurrency.value }) })
+    const response = await fetch('/api/arbitrage-pairs', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ cme_name: cmeName, forts_name: fortsName, trade_lot_currency: newTradeLotCurrency.value }) })
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || 'Не удалось добавить пару')
     newCmeName.value = ''; newFortsName.value = ''; newTradeLotCurrency.value = 'USD'; await loadPairs()
@@ -273,26 +296,241 @@ async function loadInstrumentOptions(provider, query = '') {
     const items = Array.isArray(data.items) ? data.items : []
     if (provider === 'exante') {
       exanteOptions.value = items
-      exanteHint.value = items.length ? `Найдено ${items.length} вариантов EXANTE.` : 'Совпадений EXANTE не найдено.'
+      updateCmeMatches()
     } else {
       bcsOptions.value = items
-      bcsHint.value = items.length ? `Найдено ${items.length} вариантов BCS.` : 'Совпадений BCS не найдено.'
+      updateFortsMatches()
     }
   } catch (error) {
     const message = error.message || 'Не удалось получить список тикеров'
     if (provider === 'exante') {
-      exanteHint.value = message
       exanteOptions.value = []
+      updateCmeMatches()
+      exanteHint.value = message
     } else {
       bcsHint.value = message
       bcsOptions.value = []
     }
   }
 }
-function scheduleInstrumentSearch(provider, query) {
-  if (searchTimers[provider]) clearTimeout(searchTimers[provider])
-  const normalized = (query || '').trim()
-  searchTimers[provider] = setTimeout(() => { loadInstrumentOptions(provider, normalized) }, normalized ? 180 : 0)
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
+}
+function canonicalValue(options, input) {
+  const folded = String(input || '').trim().toLowerCase()
+  if (!folded) return ''
+  const exact = options.value.find(option => option.value.toLowerCase() === folded)
+  return exact ? exact.value : String(input || '').trim()
+}
+function instrumentMatchRank(value, query) {
+  const foldedValue = String(value || '').toLowerCase()
+  const foldedQuery = String(query || '').trim().toLowerCase()
+  if (!foldedQuery) return 0
+  if (foldedValue === foldedQuery) return 0
+  if (foldedValue.startsWith(foldedQuery)) return 1
+  const valueParts = foldedValue.split('.')
+  const queryParts = foldedQuery.split('.')
+  const hasDot = foldedQuery.includes('.')
+  if (queryParts.length <= valueParts.length && queryParts.every((part, index) => !part || valueParts[index].startsWith(part))) return 2
+  if (hasDot) return null
+  if (valueParts.some(part => part.startsWith(foldedQuery))) return 3
+  if (foldedValue.includes(foldedQuery)) return 4
+  return null
+}
+function rankOption(option, query) {
+  let best = null
+  for (const candidate of [option.value, option.label, option.details]) {
+    const rank = instrumentMatchRank(candidate, query)
+    if (rank !== null && (best === null || rank < best)) best = rank
+  }
+  return best
+}
+function computeRanked(options, query) {
+  const ranked = []
+  for (const option of options) {
+    const rank = rankOption(option, query)
+    if (rank !== null) ranked.push({ option, rank })
+  }
+  ranked.sort((left, right) => (left.rank - right.rank) || left.option.value.localeCompare(right.option.value, 'en'))
+  return ranked
+}
+function computeSuggestion(matches, typed) {
+  if (!typed || !matches.length) return ''
+  const values = matches.map(option => option.value)
+  const typedParts = typed.split('.')
+  const segmentIndex = typedParts.length - 1
+  const currentTyped = typedParts[segmentIndex].toLowerCase()
+  const maxSegments = Math.max(...values.map(value => value.split('.').length))
+
+  const currentOptions = new Set()
+  for (const value of values) {
+    const parts = value.split('.')
+    if (parts.length <= segmentIndex) return ''
+    currentOptions.add(parts[segmentIndex])
+  }
+  if (currentOptions.size !== 1) return ''
+  const currentFull = [...currentOptions][0]
+  if (!currentFull.toLowerCase().startsWith(currentTyped)) return ''
+
+  const head = typedParts.slice(0, segmentIndex)
+  let result = head.length ? `${head.join('.')}.${currentFull}` : currentFull
+  for (let index = segmentIndex + 1; index < maxSegments; index += 1) {
+    const options = new Set(values.map(value => value.split('.')[index]))
+    if (options.size !== 1) break
+    const only = [...options][0]
+    if (!only) break
+    result += `.${only}`
+  }
+  return result
+}
+function updateCombobox({ options, query, matches, total, highlight, suggestion, hint, providerLabel, emptyHint }) {
+  const ranked = computeRanked(options.value, query.value.trim())
+  total.value = ranked.length
+  matches.value = ranked.slice(0, 200).map(item => item.option)
+  highlight.value = matches.value.length ? 0 : -1
+  suggestion.value = computeSuggestion(matches.value, query.value.trim())
+  const typed = query.value.trim()
+  if (!typed) {
+    hint.value = options.value.length
+      ? `В справочнике ${options.value.length} контрактов ${providerLabel}.`
+      : emptyHint
+  } else if (!total.value) {
+    hint.value = `Совпадений ${providerLabel} не найдено.`
+  } else if (total.value === 1) {
+    hint.value = `Единственный вариант: ${matches.value[0].value} — Enter или Tab, чтобы выбрать.`
+  } else {
+    const suggestionText = suggestion.value ? ` Tab — дополнить до ${suggestion.value}.` : ''
+    hint.value = `Найдено ${total.value} вариантов. Enter — выбрать первый.${suggestionText}`
+  }
+}
+function updateCmeMatches() {
+  updateCombobox({
+    options: exanteOptions, query: newCmeName, matches: cmeMatches, total: cmeTotal,
+    highlight: cmeHighlight, suggestion: cmeSuggestion, hint: exanteHint,
+    providerLabel: 'EXANTE', emptyHint: 'Начните вводить тикер или symbolId EXANTE.',
+  })
+}
+function updateFortsMatches() {
+  updateCombobox({
+    options: bcsOptions, query: newFortsName, matches: fortsMatches, total: fortsTotal,
+    highlight: fortsHighlight, suggestion: fortsSuggestion, hint: bcsHint,
+    providerLabel: 'BCS', emptyHint: 'Начните вводить тикер BCS.',
+  })
+}
+function highlightMatch(value, query) {
+  const foldedQuery = String(query || '').trim().toLowerCase()
+  if (!foldedQuery) return escapeHtml(value)
+  const index = String(value).toLowerCase().indexOf(foldedQuery)
+  if (index === -1) return escapeHtml(value)
+  return `${escapeHtml(value.slice(0, index))}<mark>${escapeHtml(value.slice(index, index + foldedQuery.length))}</mark>${escapeHtml(value.slice(index + foldedQuery.length))}`
+}
+function openCme() { cmeOpen.value = true }
+function closeCme() { cmeOpen.value = false; cmeHighlight.value = -1 }
+function onCmeFocus() {
+  openCme()
+  if (exanteOptions.value.length) {
+    updateCmeMatches()
+  } else {
+    loadInstrumentOptions('exante', '').then(() => { updateCmeMatches(); openCme() })
+  }
+}
+function onCmeInput(event) { openCme(); upperCaseField(event, newCmeName); updateCmeMatches() }
+function onFortsInput(event) { upperCaseField(event, newFortsName); openForts(); updateFortsMatches() }
+function upperCaseField(event, modelRef) {
+  const element = event?.target
+  const start = element?.selectionStart ?? null
+  const end = element?.selectionEnd ?? null
+  const upper = String(modelRef.value || '').toUpperCase()
+  if (upper !== modelRef.value) {
+    modelRef.value = upper
+    if (element && start !== null && end !== null) {
+      element.setSelectionRange(start, end)
+    }
+  }
+}
+function onCmeBlur() { setTimeout(() => { closeCme() }, 150) }
+function pickCme(match) {
+  newCmeName.value = match.value
+  closeCme()
+  nextTick(() => cmeInput.value?.focus())
+}
+function onCmeKeydown(event) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    openCme()
+    if (cmeMatches.value.length) cmeHighlight.value = Math.min(cmeHighlight.value + 1, cmeMatches.value.length - 1)
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    openCme()
+    if (cmeMatches.value.length) cmeHighlight.value = Math.max(cmeHighlight.value - 1, 0)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    closeCme()
+  } else if (event.key === 'Tab') {
+    if (cmeSuggestion.value) {
+      event.preventDefault()
+      newCmeName.value = cmeSuggestion.value
+      updateCmeMatches()
+      openCme()
+    }
+  } else if (event.key === 'Enter') {
+    if (cmeOpen.value && cmeMatches.value.length) {
+      const target = cmeMatches.value[Math.max(cmeHighlight.value, 0)]
+      if (target && target.value.toLowerCase() === newCmeName.value.trim().toLowerCase()) {
+        closeCme()
+        return
+      }
+      event.preventDefault()
+      pickCme(target)
+    }
+  }
+}
+function openForts() { fortsOpen.value = true }
+function closeForts() { fortsOpen.value = false; fortsHighlight.value = -1 }
+function onFortsFocus() {
+  openForts()
+  if (bcsOptions.value.length) {
+    updateFortsMatches()
+  } else {
+    loadInstrumentOptions('bcs', '').then(() => { updateFortsMatches(); openForts() })
+  }
+}
+function onFortsBlur() { setTimeout(() => { closeForts() }, 150) }
+function pickForts(match) {
+  newFortsName.value = match.value
+  closeForts()
+  nextTick(() => fortsInput.value?.focus())
+}
+function onFortsKeydown(event) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    openForts()
+    if (fortsMatches.value.length) fortsHighlight.value = Math.min(fortsHighlight.value + 1, fortsMatches.value.length - 1)
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    openForts()
+    if (fortsMatches.value.length) fortsHighlight.value = Math.max(fortsHighlight.value - 1, 0)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    closeForts()
+  } else if (event.key === 'Tab') {
+    if (fortsSuggestion.value) {
+      event.preventDefault()
+      newFortsName.value = fortsSuggestion.value
+      updateFortsMatches()
+      openForts()
+    }
+  } else if (event.key === 'Enter') {
+    if (fortsOpen.value && fortsMatches.value.length) {
+      const target = fortsMatches.value[Math.max(fortsHighlight.value, 0)]
+      if (target && target.value.toLowerCase() === newFortsName.value.trim().toLowerCase()) {
+        closeForts()
+        return
+      }
+      event.preventDefault()
+      pickForts(target)
+    }
+  }
 }
 function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
 function formatDate(value) { return value ? new Intl.DateTimeFormat('ru-RU').format(new Date(`${value}T00:00:00`)) : '—' }
@@ -333,7 +571,18 @@ onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeou
 label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex Mono', monospace; letter-spacing: .6px; text-transform: uppercase; } input { width: 100%; margin-top: 7px; border: 1px solid #3b4742; border-radius: 2px; padding: 11px 12px; outline: none; color: #eef6f1; background: #101514; } input:focus { border-color: #77d6b6; } .primary-button { border: 1px solid #77d6b6; border-radius: 2px; padding: 11px 16px; color: #10201b; background: #77d6b6; font-weight: 700; font-size: 12px; letter-spacing: .2px; } .primary-button:hover { background: #9ae3c9; } .primary-button:disabled { cursor: wait; opacity: .65; } .login-panel .primary-button { width: 100%; margin-top: 12px; } .form-error { margin: 12px 0 0; color: #ff9d8b; font-size: 12px; } .login-status { position: absolute; bottom: 28px; color: #72827a; font: 10px 'IBM Plex Mono', monospace; letter-spacing: .4px; } .login-status span, .market-status i, .table-toolbar i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #77d6b6; box-shadow: 0 0 12px #77d6b6; }
 .topbar { min-height: 70px; display: flex; justify-content: space-between; align-items: center; padding: 12px max(22px, calc((100% - 1440px) / 2)); border-bottom: 1px solid #2c3632; background: rgba(14,19,18,.94); } .brand, .topbar-actions { display: flex; align-items: center; gap: 12px; } .brand strong { display: block; margin-top: 3px; font-size: 14px; } .market-status, .user-name, .logout-button { color: #aeb9b3; font: 11px 'IBM Plex Mono', monospace; } .logout-button { border: 1px solid #3b4742; border-radius: 2px; padding: 8px 10px; background: transparent; } .logout-button:hover { color: #fff; border-color: #76837d; }
 .workspace { max-width: 1440px; margin: 0 auto; padding: 46px 22px; } .dashboard-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 34px; } .dashboard-heading h1 { margin: 8px 0 7px; font-size: clamp(26px,3vw,38px); line-height: 1; letter-spacing: 0; } .dashboard-heading > div > p:last-child, .add-pair-row span { margin: 0; color: #8f9d96; font-size: 13px; } .heading-metrics { display: flex; gap: 30px; } .heading-metrics div { min-width: 84px; border-left: 1px solid #3a4641; padding-left: 12px; } .heading-metrics span { display: block; color: #7f8d86; font: 10px 'IBM Plex Mono', monospace; letter-spacing: .7px; } .heading-metrics strong { display: block; margin-top: 4px; color: #e4eee9; font: 600 15px 'IBM Plex Mono', monospace; }
-.add-pair-row { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 19px 20px; margin-bottom: 18px; border: 1px solid #35423d; background: #19201e; } .section-label { margin-bottom: 7px; } .add-pair-form { display: flex; width: min(100%,700px); gap: 8px; align-items: end; } .pair-fields { display: flex; flex: 1; gap: 8px; } .pair-fields input { margin: 0; flex: 1; min-width: 0; } .pair-select { flex: 1; margin: 0; min-width: 0; } .pair-select input { margin-top: 7px; } .pair-hint { display: block; margin-top: 7px; color: #7f8d86; font-size: 11px; line-height: 1.4; text-transform: none; letter-spacing: 0; } .add-pair-form .primary-button { white-space: nowrap; } .table-section { border: 1px solid #35423d; background: #141a18; } .table-toolbar { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #35423d; color: #aeb9b3; font: 12px 'IBM Plex Mono', monospace; } .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font: 12px 'IBM Plex Mono', monospace; } th { padding: 13px 12px; color: #84948c; font-weight: 500; text-align: right; white-space: nowrap; background: #171e1b; } td { padding: 14px 12px; color: #dbe4df; text-align: right; white-space: nowrap; border-top: 1px solid #28322e; } th:first-child, th:nth-child(7), td:first-child, td:nth-child(7) { text-align: left; } tbody tr:hover { background: #1a2420; } .instrument { color: #f0f7f3; font-weight: 600; } .positive { color: #75dbb6; } .negative { color: #ff9989; } .editable-cell { cursor: text; outline: 1px dashed transparent; outline-offset: -4px; } .editable-cell:hover { outline-color: #587269; background: #18221e; } .editable-cell input { width: 100%; min-width: 72px; margin: -7px 0; border-color: #77d6b6; padding: 6px 7px; text-align: right; font: inherit; } .editable-cell.is-invalid { color: #ff9d8b; outline-color: #ff7567; background: rgba(158, 54, 44, .24); } .editable-cell.is-invalid input { border-color: #ff7567; } .empty-state { padding: 35px; color: #8f9d96; text-align: center !important; } .table-error { margin-bottom: 14px; }
+.add-pair-row { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 19px 20px; margin-bottom: 18px; border: 1px solid #35423d; background: #19201e; } .section-label { margin-bottom: 7px; } .add-pair-form { display: flex; width: min(100%,700px); gap: 8px; align-items: end; } .pair-fields { display: flex; flex: 1; gap: 8px; } .pair-fields input { margin: 0; flex: 1; min-width: 0; } .pair-select { flex: 1; margin: 0; min-width: 0; } .pair-select input { margin-top: 7px; } .pair-hint { display: block; margin-top: 7px; color: #7f8d86; font-size: 11px; line-height: 1.4; text-transform: none; letter-spacing: 0; }
+.combobox { position: relative; }
+.combobox-control { position: relative; margin-top: 7px; }
+.pair-select .combobox-control { margin-top: 0; }
+.combobox-input { position: relative; z-index: 2; margin-top: 0 !important; }
+.combobox-menu { position: absolute; z-index: 30; top: 100%; left: 0; right: 0; max-height: 280px; margin: 4px 0 0; padding: 4px 0; overflow-y: auto; border: 1px solid #35423d; border-top: 2px solid #77d6b6; background: #101514; list-style: none; text-transform: none; box-shadow: 0 18px 44px rgba(0, 0, 0, .45); }
+.combobox-menu li { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; cursor: pointer; }
+.combobox-menu li.is-active { background: #1a2420; }
+.combobox-value { color: #eef6f1; font: 500 12px 'IBM Plex Mono', monospace; white-space: nowrap; }
+.combobox-value mark { color: #77d6b6; background: rgba(119, 214, 182, .12); padding: 0 1px; }
+.combobox-details { flex: 1; min-width: 0; overflow: hidden; color: #7f8d86; font: 11px 'IBM Plex Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+.add-pair-form .primary-button { white-space: nowrap; } .table-section { border: 1px solid #35423d; background: #141a18; } .table-toolbar { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #35423d; color: #aeb9b3; font: 12px 'IBM Plex Mono', monospace; } .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font: 12px 'IBM Plex Mono', monospace; } th { padding: 13px 12px; color: #84948c; font-weight: 500; text-align: right; white-space: nowrap; background: #171e1b; } td { padding: 14px 12px; color: #dbe4df; text-align: right; white-space: nowrap; border-top: 1px solid #28322e; } th:first-child, th:nth-child(7), td:first-child, td:nth-child(7) { text-align: left; } tbody tr:hover { background: #1a2420; } .instrument { color: #f0f7f3; font-weight: 600; } .positive { color: #75dbb6; } .negative { color: #ff9989; } .editable-cell { cursor: text; outline: 1px dashed transparent; outline-offset: -4px; } .editable-cell:hover { outline-color: #587269; background: #18221e; } .editable-cell input { width: 100%; min-width: 72px; margin: -7px 0; border-color: #77d6b6; padding: 6px 7px; text-align: right; font: inherit; } .editable-cell.is-invalid { color: #ff9d8b; outline-color: #ff7567; background: rgba(158, 54, 44, .24); } .editable-cell.is-invalid input { border-color: #ff7567; } .empty-state { padding: 35px; color: #8f9d96; text-align: center !important; } .table-error { margin-bottom: 14px; }
 .currency-rates { display: flex; align-items: stretch; margin-bottom: 18px; border: 1px solid #35423d; background: #161d1a; font: 12px 'IBM Plex Mono', monospace; } .currency-rates-title, .currency-rate { display: flex; flex-direction: column; justify-content: center; padding: 12px 16px; border-right: 1px solid #35423d; } .currency-rates-title { min-width: 215px; color: #77d6b6; letter-spacing: .6px; } .currency-rates-title small, .currency-rates-empty { margin-top: 4px; color: #7f8d86; font-size: 11px; letter-spacing: 0; } .currency-rate { min-width: 150px; gap: 4px; } .currency-rate strong { color: #aeb9b3; font-weight: 500; } .currency-rate span { color: #e4eee9; font-size: 14px; font-weight: 600; } .currency-rates-empty { align-self: center; margin: 0; padding: 0 16px; }
 .table-toolbar { align-items: center; gap: 12px; padding: 10px 12px; } .table-toolbar-actions { display: flex; align-items: center; gap: 12px; } .details-toggle { border: 1px solid #46574f; border-radius: 2px; padding: 6px 8px; color: #b9c7c0; background: #19211e; font: 11px 'IBM Plex Mono', monospace; } .details-toggle:hover { border-color: #77d6b6; color: #e7f4ed; } th, td { text-align: center !important; } th { padding: 9px 8px; line-height: 1.25; } .header-label { display: inline-block; } .sort-header { display: inline-flex; align-items: center; justify-content: center; gap: 3px; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; text-align: inherit; } .sort-header:hover, .sort-header:focus-visible, .sort-header.is-active { color: #77d6b6; } .sort-header:focus-visible { outline: 1px solid #77d6b6; outline-offset: 3px; } table.is-compact { min-width: 920px; table-layout: fixed; } .contract-column { width: 14%; } .date-column { width: 9%; } .price-column, .ratio-column { width: 8%; } .dte-column, .percent-column { width: 5%; } .virt-column, .diff-column { width: 7%; } .ytm-column { width: 6%; } .action-column { width: 4%; } td { max-width: 132px; padding: 10px 8px; } .instrument { display: block; max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; } .editable-cell input { min-width: 64px; margin: -5px 0; padding: 5px 6px; } .trade-lot-currency { border: 1px solid #46574f; border-radius: 2px; padding: 5px 6px; color: #dbe4df; background: #19211e; font: inherit; } .trade-lot-currency:focus { border-color: #77d6b6; outline: none; } .trade-lot-currency:disabled { cursor: wait; opacity: .6; } .pair-action { padding: 0 4px; } .delete-pair-button { width: 24px; height: 24px; border: 1px solid transparent; border-radius: 2px; padding: 0; color: #87958e; background: transparent; font: 500 18px/1 'IBM Plex Mono', monospace; } .delete-pair-button:hover:not(:disabled) { border-color: #a85850; color: #ff9989; background: rgba(158, 54, 44, .18); } .delete-pair-button:disabled { cursor: wait; opacity: .45; }
 @media (max-width: 700px) { .topbar, .dashboard-heading, .add-pair-row { align-items: flex-start; flex-direction: column; } .topbar-actions { width: 100%; justify-content: space-between; } .workspace { padding: 30px 14px; } .heading-metrics { width: 100%; } .add-pair-form { width: 100%; flex-direction: column; } .pair-fields { width: 100%; flex-direction: column; } .pair-select { width: 100%; } .add-pair-form .primary-button { width: 100%; } .currency-rates { flex-wrap: wrap; } .currency-rates-title { width: 100%; min-width: 0; border-bottom: 1px solid #35423d; } .currency-rate { flex: 1; min-width: 0; } .currency-rate:last-of-type { border-right: 0; } .login-panel { padding: 28px 23px; } }
@@ -350,7 +599,7 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .pair-select .pair-hint { margin-top: 0; }
 .pair-currency-control { display: block; position: relative; margin-top: 0; }
 .pair-currency-control::after { content: ''; position: absolute; top: 50%; right: 14px; width: 6px; height: 6px; border-right: 1px solid #aeb9b3; border-bottom: 1px solid #aeb9b3; pointer-events: none; transform: translateY(-70%) rotate(45deg); }
-.pair-currency-select { width: 100%; appearance: none; border: 1px solid #3b4742; border-radius: 2px; padding: 0 32px 0 12px; color: #eef6f1; background: #101514; cursor: pointer; }
+.pair-currency-select { width: 100%; appearance: none; border: 1px solid #3b4742; border-radius: 2px; padding: 0 32px 0 12px; color: #eef6f1; background: #101514; font: inherit; cursor: pointer; }
 .pair-currency-select:focus { border-color: #77d6b6; outline: none; }
 .add-pair-form .primary-button { align-self: flex-start; height: 40px; margin-top: 21px; padding: 0 16px; }
 @media (max-width: 700px) { .add-pair-form .primary-button { margin-top: 0; } }
