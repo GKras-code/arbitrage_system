@@ -844,6 +844,10 @@ async def _sync_currency_rates_periodically() -> None:
         try:
             rates = await _refresh_currency_rates()
             print(f"Курсы MOEX обновлены: {len(rates)} валют.", flush=True)
+            if rates:
+                # Курсы изменились — пересчитаем метрики пар и уведомим клиентов.
+                await _refresh_arbitrage_metrics()
+                await _publish_price_update()
         except asyncio.CancelledError:
             raise
         except Exception as error:

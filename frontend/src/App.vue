@@ -198,6 +198,7 @@ function schedulePriceRefresh() {
   if (remaining <= 0) {
     lastPriceRefresh = now
     loadPairs(false)
+    loadCurrencyRates()
     return
   }
   if (priceRefreshPending) return
@@ -207,6 +208,7 @@ function schedulePriceRefresh() {
     priceRefreshTimer = null
     lastPriceRefresh = Date.now()
     loadPairs(false)
+    loadCurrencyRates()
   }, remaining)
 }
 async function addPair() {
