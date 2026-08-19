@@ -602,15 +602,18 @@ class BCSConnector:
             param={"type": normalized_type, "page": page, "size": size},
         )
 
-    async def get_all_futures(
+    async def get_all_by_type(
         self,
+        instrument_type: str,
         page_size: int = 100,
         request_delay: float = 0.1,
     ) -> list[dict] | bool:
-        """Получить все фьючерсы BCS с постраничной загрузкой.
+        """Получить все инструменты BCS заданного типа с постраничной загрузкой.
 
         Параметры
         ---------
+        instrument_type : str
+            Тип инструмента (FUTURES, CURRENCY, STOCK, ...).
         page_size : int
             Число инструментов в одном запросе.
         request_delay : float
@@ -619,31 +622,41 @@ class BCSConnector:
         Returns
         -------
         list[dict] | False
-            Полный список фьючерсов или False при ошибке запроса.
+            Полный список инструментов или False при ошибке запроса.
         """
         if page_size < 1:
             raise ValueError("page_size должен быть положительным")
         if request_delay < 0:
             raise ValueError("request_delay не может быть отрицательным")
 
-        futures: list[dict] = []
+        instruments: list[dict] = []
         page = 0
         while True:
             batch = await self.get_instruments_by_type(
-                "FUTURES", page=page, size=page_size
+                instrument_type, page=page, size=page_size
             )
             if batch is False:
                 return False
             if not batch:
-                return futures
+                return instruments
 
-            futures.extend(batch)
+            instruments.extend(batch)
             if len(batch) < page_size:
-                return futures
+                return instruments
 
             page += 1
             if request_delay:
                 await asyncio.sleep(request_delay)
+
+    async def get_all_futures(
+        self,
+        page_size: int = 100,
+        request_delay: float = 0.1,
+    ) -> list[dict] | bool:
+        """Получить все фьючерсы BCS с постраничной загрузкой."""
+        return await self.get_all_by_type(
+            "FUTURES", page_size=page_size, request_delay=request_delay
+        )
 
     
     async def get_last_trade_price(
@@ -1037,8 +1050,8 @@ async def main():
             print(f"  last={last_trade_price}")
 
         # 1. Все валютные инструменты (CURRENCY)
-        print("\n=== Все валютные инструменты (get_all_currencies) ===")
-        currencies = await connector.get_all_currencies(page_size=50)
+        print("\n=== Все валютные инструменты (get_all_by_type CURRENCY) ===")
+        currencies = await connector.get_all_by_type("CURRENCY", page_size=50)
         if isinstance(currencies, list):
             print(f"  Всего валютных инструментов: {len(currencies)}")
             for inst in currencies:

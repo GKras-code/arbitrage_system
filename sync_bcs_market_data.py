@@ -9,7 +9,7 @@ from db import create_pool
 from connectors.bcs_connector import BCSConnector
 
 TABLE_NAME = "bcs_market_data"
-INSTRUMENT_TYPES = ("FUTURES",)
+INSTRUMENT_TYPES = ("FUTURES", "CURRENCY", "STOCK")
 
 CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
@@ -73,6 +73,34 @@ def _date(value: Any) -> date | None:
         return None
 
 
+def _primary_board(instrument: dict[str, Any]) -> str:
+    """Вернуть первый (первичный) борд инструмента."""
+    boards = instrument.get("boards") or []
+    if boards and isinstance(boards[0], dict):
+        return str(boards[0].get("classCode") or "").strip()
+    return ""
+
+
+def _dedupe_instruments(
+    instruments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Оставить один инструмент на тикер, предпочитая первичный борд MOEX (TQBR).
+
+    BCS возвращает по одной записи на каждый торговый режим (board) — например,
+    акция SBER есть и в TQBR, и в SPBRU. Таблица индексирована по ticker, поэтому
+    дубликаты нужно схлопывать в одну строку.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for instrument in instruments:
+        ticker = str(instrument.get("ticker") or "").strip()
+        if not ticker:
+            continue
+        current = best.get(ticker)
+        if current is None or _primary_board(instrument) == "TQBR":
+            best[ticker] = instrument
+    return list(best.values())
+
+
 def _to_row(instrument: dict[str, Any]) -> tuple[Any, ...] | None:
     ticker = str(instrument.get("ticker") or "").strip()
     if not ticker:
@@ -84,7 +112,7 @@ def _to_row(instrument: dict[str, Any]) -> tuple[Any, ...] | None:
         str(instrument.get("instrumentType") or instrument.get("type") or "").strip(),
         _decimal(instrument.get("minimumStep")),
         _decimal(instrument.get("stepPrice") or instrument.get("step_price")),
-        str(instrument.get("stepPriceCurrency") or instrument.get("step_price_currency") or "").strip() or None,
+        str(instrument.get("currencyStepPrice") or instrument.get("stepPriceCurrency") or "").strip() or None,
         str(instrument.get("baseAsset") or instrument.get("base_asset") or "").strip() or None,
         _date(instrument.get("maturityDate")),
         _decimal(instrument.get("lotSize")),
@@ -95,10 +123,7 @@ async def get_instruments(connector: BCSConnector) -> list[dict[str, Any]] | boo
     """Получить типы инструментов, заданные для синхронизации."""
     instruments: list[dict[str, Any]] = []
     for instrument_type in INSTRUMENT_TYPES:
-        if instrument_type == "FUTURES":
-            batch = await connector.get_all_futures()
-        else:
-            raise ValueError(f"Не поддержан тип инструмента: {instrument_type}")
+        batch = await connector.get_all_by_type(instrument_type)
         if batch is False:
             return False
         instruments.extend(batch)
@@ -116,6 +141,7 @@ async def sync_market_data() -> int:
     if instruments is False:
         raise RuntimeError("Не удалось получить инструменты BCS; данные в БД не изменены.")
 
+    instruments = _dedupe_instruments(instruments)
     rows = [row for instrument in instruments if (row := _to_row(instrument))]
     pool = await create_pool()
     try:
