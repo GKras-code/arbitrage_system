@@ -21,12 +21,13 @@ from typing import Literal
 
 import jwt
 import aiohttp
+import asyncpg
 import certifi
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Путь к корню проекта (чтобы импортировать connectors)
@@ -49,6 +50,8 @@ REFERENCE_CACHE_TTL_SECONDS = 15 * 60
 REFERENCE_SYNC_HOUR_UTC = 3
 FORTS_MARGIN_SYNC_INTERVAL_SECONDS = 3 * 60 * 60
 BCS_FUTURES_CLASS_CODE = os.getenv("BCS_FUTURES_CLASS_CODE", "SPBFUT")
+BCS_STOCK_CLASS_CODE = os.getenv("BCS_STOCK_CLASS_CODE", "TQBR")
+BCS_CURRENCY_CLASS_CODE = os.getenv("BCS_CURRENCY_CLASS_CODE", "CETS")
 MOEX_FUTURES_SECURITY_URL = "https://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}.json"
 CURRENCY_RATE_SOURCES = {
     "USD": ("EUR/USD", Decimal("10")),
@@ -81,9 +84,23 @@ class PairCreateRequest(BaseModel):
     trade_lot_currency: Literal["USD", "CNY"] = "USD"
 
 
+class MoexSpotFuturePairCreateRequest(BaseModel):
+    spot_name: str = Field(min_length=1, max_length=100)
+    future_name: str = Field(min_length=1, max_length=100)
+    price_ratio: Decimal | None = None
+    spot_dividend: Decimal = Decimal("0")
+
+
 class PairManualValueUpdate(BaseModel):
-    field: Literal["virt_0", "price_ratio", "cme_margin_usd"]
+    field: Literal["virt_0", "price_ratio", "cme_margin_usd", "spot_trade_lot", "future_trade_lot", "discount", "spot_dividend"]
     value: Decimal
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def normalize_decimal_separator(cls, value):
+        if isinstance(value, str):
+            return value.strip().replace(",", ".")
+        return value
 
 
 def password_hash(password: str) -> str:
@@ -215,6 +232,7 @@ async def _market_data_options(
     query: str,
     limit: int,
     provider_label: str,
+    instrument_type: str | None = None,
 ) -> list[dict[str, str]]:
     """Найти инструменты в синхронизированном справочнике провайдера.
 
@@ -231,6 +249,14 @@ async def _market_data_options(
     normalized_query = query.strip()
     ranked: list[tuple[int, str, dict]] = []
     for row in rows:
+        if instrument_type:
+            row_type = str(row.get("instrument_type") or "").upper()
+            requested_type = instrument_type.upper()
+            if requested_type == "SPOT":
+                if row_type not in {"STOCK", "CURRENCY"}:
+                    continue
+            elif row_type != requested_type:
+                continue
         value = str(row.get("value") or "").strip()
         ticker = str(row.get("ticker") or "").strip()
         short_name = str(row.get("short_name") or "").strip()
@@ -339,6 +365,16 @@ async def _search_bcs_options(query: str, limit: int) -> list[dict[str, str]]:
     )
 
 
+async def _search_bcs_typed_options(
+    query: str,
+    limit: int,
+    instrument_type: str,
+) -> list[dict[str, str]]:
+    return await _market_data_options(
+        "bcs_market_data", "ticker", query, limit, "BCS", instrument_type
+    )
+
+
 async def initialize_database() -> None:
     pool = await create_pool()
     async with pool.acquire() as connection:
@@ -387,6 +423,31 @@ async def initialize_database() -> None:
                 diff_ytm_margin NUMERIC(18, 4)
             );
 
+            CREATE TABLE IF NOT EXISTS moex_spot_future_pairs (
+                id BIGSERIAL PRIMARY KEY,
+                spot_name VARCHAR(100) NOT NULL,
+                spot_price NUMERIC(18, 6),
+                discount NUMERIC(18, 6) NOT NULL DEFAULT 1,
+                spot_margin NUMERIC(18, 6),
+                spot_lot NUMERIC(18, 6),
+                spot_data_exp DATE,
+                price_ratio NUMERIC(18, 6),
+                spot_trade_lot NUMERIC(18, 6),
+                spot_dividend NUMERIC(18, 6) NOT NULL DEFAULT 0,
+                future_name VARCHAR(100) NOT NULL,
+                future_price NUMERIC(18, 6),
+                future_margin NUMERIC(18, 6),
+                future_lot NUMERIC(18, 6),
+                future_data_exp DATE,
+                future_trade_lot NUMERIC(18, 6),
+                dte INTEGER,
+                diff NUMERIC(18, 6),
+                diff_percent NUMERIC(18, 6),
+                diff_ytm_margin NUMERIC(18, 6),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (spot_name, future_name)
+            );
+
             CREATE TABLE IF NOT EXISTS currency_rates (
                 currency_code VARCHAR(3) PRIMARY KEY,
                 rate NUMERIC(18, 6) NOT NULL,
@@ -395,6 +456,10 @@ async def initialize_database() -> None:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """
+        )
+        await connection.execute(
+            "ALTER TABLE moex_spot_future_pairs "
+            "ADD COLUMN IF NOT EXISTS discount NUMERIC(18, 6) NOT NULL DEFAULT 1"
         )
         await connection.execute(
             """
@@ -497,6 +562,82 @@ def _calculate_pair_metrics(
     diff_percent = diff * cme_lot / total_margin
     diff_ytm_margin = diff_percent / dte * Decimal("365")
     return dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin
+
+
+async def _refresh_moex_metrics() -> bool:
+    """Пересчитать DTE, Diff и доходность MOEX spot-futures."""
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        updated = await connection.fetch(
+            """
+            WITH base AS (
+                SELECT pairs.id,
+                       CASE
+                           WHEN pairs.spot_data_exp IS NULL AND pairs.future_data_exp IS NULL THEN NULL
+                           WHEN pairs.spot_data_exp IS NULL THEN pairs.future_data_exp - CURRENT_DATE
+                           WHEN pairs.future_data_exp IS NULL THEN pairs.spot_data_exp - CURRENT_DATE
+                           ELSE LEAST(pairs.spot_data_exp, pairs.future_data_exp) - CURRENT_DATE
+                       END AS dte,
+                       pairs.spot_price,
+                       pairs.price_ratio,
+                       pairs.spot_dividend,
+                       pairs.future_price,
+                       pairs.spot_margin,
+                       pairs.spot_lot,
+                       pairs.spot_trade_lot,
+                       pairs.future_margin,
+                       pairs.future_trade_lot,
+                       upper(market.instrument_type) AS spot_instrument_type
+                FROM moex_spot_future_pairs AS pairs
+                LEFT JOIN bcs_market_data AS market ON market.ticker = pairs.spot_name
+            ),
+            calculated AS (
+                SELECT *,
+                       CASE
+                           WHEN spot_price IS NOT NULL AND price_ratio IS NOT NULL
+                                AND future_price IS NOT NULL
+                           THEN future_price - spot_price * price_ratio + COALESCE(spot_dividend, 0)
+                       END AS diff
+                FROM base
+            ),
+            metrics AS (
+                SELECT *,
+                       CASE
+                           WHEN diff IS NULL OR spot_instrument_type IS NULL THEN NULL
+                           WHEN spot_instrument_type = 'STOCK'
+                                AND spot_margin IS NOT NULL AND spot_trade_lot IS NOT NULL
+                                AND future_margin IS NOT NULL
+                                AND spot_margin * spot_trade_lot + future_margin <> 0
+                           THEN diff / (spot_margin * spot_trade_lot + future_margin)
+                           WHEN spot_instrument_type = 'CURRENCY'
+                                AND spot_lot IS NOT NULL AND spot_margin IS NOT NULL
+                                AND spot_trade_lot IS NOT NULL AND future_margin IS NOT NULL
+                                AND future_trade_lot IS NOT NULL
+                                AND GREATEST(spot_margin * spot_trade_lot, future_margin * future_trade_lot) <> 0
+                           THEN diff * spot_lot /
+                                GREATEST(spot_margin * spot_trade_lot, future_margin * future_trade_lot)
+                       END AS diff_percent
+                FROM calculated
+            )
+            UPDATE moex_spot_future_pairs AS pairs
+            SET dte = metrics.dte,
+                diff = metrics.diff,
+                diff_percent = metrics.diff_percent,
+                diff_ytm_margin = CASE
+                    WHEN metrics.diff_percent IS NOT NULL AND metrics.dte IS NOT NULL AND metrics.dte <> 0
+                    THEN metrics.diff_percent / metrics.dte * 365
+                END
+            FROM metrics
+            WHERE pairs.id = metrics.id
+            RETURNING pairs.id
+            """
+        )
+    return bool(updated)
+
+
+async def _refresh_moex_dte() -> bool:
+    """Совместимость для вызывающего кода, который обновляет DTE MOEX."""
+    return await _refresh_moex_metrics()
 
 
 def _moex_step_price(payload: dict[str, object]) -> Decimal | None:
@@ -676,6 +817,45 @@ async def _save_market_price(column: str, instrument: str, price: object) -> Non
         await _publish_price_update()
 
 
+async def _save_moex_market_price(instrument: str, price: object) -> None:
+    """Store a BCS quote for any spot or futures instrument in the MOEX table."""
+    if price is None or not instrument:
+        return
+    try:
+        value = Decimal(str(price))
+    except Exception:
+        return
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        updated = await connection.fetch(
+            f"""
+            UPDATE moex_spot_future_pairs
+            SET spot_price = CASE WHEN spot_name = $2 THEN $1 ELSE spot_price END,
+                spot_margin = CASE WHEN spot_name = $2
+                    THEN $1 * spot_lot * COALESCE(discount, 1)
+                    ELSE spot_margin END,
+                future_price = CASE WHEN future_name = $2 THEN $1 ELSE future_price END,
+                price_ratio = CASE
+                    WHEN COALESCE(price_ratio, 0) = 0
+                        AND COALESCE(CASE WHEN spot_name = $2 THEN $1 ELSE spot_price END, 0) <> 0
+                        AND COALESCE(CASE WHEN future_name = $2 THEN $1 ELSE future_price END, 0) <> 0
+                    THEN ROUND(
+                        CASE WHEN future_name = $2 THEN $1 ELSE future_price END /
+                        CASE WHEN spot_name = $2 THEN $1 ELSE spot_price END, 0
+                    )
+                    ELSE price_ratio
+                END
+            WHERE spot_name = $2 OR future_name = $2
+            RETURNING id
+            """,
+            value,
+            instrument,
+        )
+    if updated:
+        await _refresh_moex_metrics()
+        await _publish_price_update()
+
+
 def _mid_price(bid: object, ask: object) -> Decimal | None:
     """Return the midpoint of the best bid and ask, if both are available."""
     def price(value: object) -> object:
@@ -692,17 +872,31 @@ def _mid_price(bid: object, ask: object) -> Decimal | None:
     return midpoint if midpoint.is_finite() else None
 
 
-async def _stream_bcs_prices(instruments: list[dict[str, str]]) -> None:
+async def _stream_bcs_prices(
+    instruments: list[dict[str, str]],
+    load_last_prices: bool = False,
+) -> None:
     """Receive BCS quote updates and persist their bid/ask midpoint."""
     connector = BCSConnector()
     try:
+        if load_last_prices:
+            for instrument in instruments:
+                last_price = await connector.get_last_trade_price(
+                    instrument["ticker"], instrument["classCode"]
+                )
+                if last_price is not None:
+                    await _save_moex_market_price(instrument["ticker"], last_price)
+
         async def on_quote(quote: dict) -> None:
             if quote.get("responseType") == "Quotes":
+                ticker = str(quote.get("ticker") or "")
+                midpoint = _mid_price(quote.get("bid"), quote.get("offer"))
                 await _save_market_price(
                     "forts_price",
-                    str(quote.get("ticker") or ""),
-                    _mid_price(quote.get("bid"), quote.get("offer")),
+                    ticker,
+                    midpoint,
                 )
+                await _save_moex_market_price(ticker, midpoint)
 
         await connector.stream_quotes(instruments, on_quote)
     finally:
@@ -737,6 +931,19 @@ async def _restart_market_subscriptions() -> None:
     async with pool.acquire() as connection:
         cme_symbols = await connection.fetch("SELECT DISTINCT cme_name FROM arbitrage_pairs WHERE cme_name <> ''")
         forts_tickers = await connection.fetch("SELECT DISTINCT forts_name FROM arbitrage_pairs WHERE COALESCE(forts_name, '') <> ''")
+        moex_tickers = await connection.fetch(
+            """
+            SELECT pairs.spot_name AS ticker,
+                   CASE WHEN instruments.instrument_type = 'CURRENCY' THEN $1::text ELSE $2::text END AS class_code
+            FROM moex_spot_future_pairs pairs
+            JOIN bcs_market_data instruments ON instruments.ticker = pairs.spot_name
+            UNION
+            SELECT future_name AS ticker, $3::text AS class_code FROM moex_spot_future_pairs
+            """,
+            BCS_CURRENCY_CLASS_CODE,
+            BCS_STOCK_CLASS_CODE,
+            BCS_FUTURES_CLASS_CODE,
+        )
 
     _market_data_tasks = []
     exante_auth_configured = (
@@ -762,6 +969,15 @@ async def _restart_market_subscriptions() -> None:
         ]
         _market_data_tasks.append(asyncio.create_task(
             _stream_bcs_prices(instruments), name="bcs-price-stream"
+        ))
+    if moex_tickers and os.getenv("BCS_REFRESH_TOKEN"):
+        instruments = [
+            {"ticker": row["ticker"], "classCode": row["class_code"]}
+            for row in moex_tickers
+        ]
+        _market_data_tasks.append(asyncio.create_task(
+            _stream_bcs_prices(instruments, load_last_prices=True),
+            name="bcs-moex-price-stream",
         ))
 
 
@@ -822,6 +1038,7 @@ async def _sync_forts_margins_periodically() -> None:
             print(f"Параметры FORTS обновлены: {updated} тикеров.", flush=True)
             if updated:
                 await _refresh_arbitrage_metrics()
+                await _refresh_moex_metrics()
                 await _publish_price_update()
         except asyncio.CancelledError:
             raise
@@ -958,6 +1175,140 @@ async def list_arbitrage_pairs(_: str = Depends(get_current_user)):
             """
         )
     return {"pairs": [dict(row) for row in rows]}
+
+
+@app.get("/api/moex-spot-future-pairs")
+async def list_moex_spot_future_pairs(_: str = Depends(get_current_user)):
+    await _refresh_moex_metrics()
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT id, spot_name, spot_price, discount, spot_margin, spot_lot, spot_data_exp,
+                   price_ratio, spot_trade_lot, spot_dividend,
+                   future_name, future_price, future_margin, future_lot, future_data_exp,
+                   future_trade_lot, dte, diff, diff_percent, diff_ytm_margin
+            FROM moex_spot_future_pairs
+            ORDER BY id
+            """
+        )
+    return {"pairs": [dict(row) for row in rows]}
+
+
+@app.post("/api/moex-spot-future-pairs", status_code=status.HTTP_201_CREATED)
+async def create_moex_spot_future_pair(
+    request: MoexSpotFuturePairCreateRequest,
+    _: str = Depends(get_current_user),
+):
+    spot_name = request.spot_name.strip()
+    future_name = request.future_name.strip()
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        instruments = await connection.fetch(
+            """
+            SELECT ticker, instrument_type, lot_size, maturity_date
+            FROM bcs_market_data
+            WHERE ticker = ANY($1::text[])
+            """,
+            [spot_name, future_name],
+        )
+        by_ticker = {str(row["ticker"]): row for row in instruments}
+        spot = by_ticker.get(spot_name)
+        future = by_ticker.get(future_name)
+        if spot is None or str(spot["instrument_type"]).upper() not in {"STOCK", "CURRENCY"}:
+            raise HTTPException(status_code=400, detail="Spot-инструмент отсутствует в справочнике BCS")
+        if future is None or str(future["instrument_type"]).upper() != "FUTURES":
+            raise HTTPException(status_code=400, detail="Фьючерс отсутствует в справочнике BCS")
+        try:
+            row = await connection.fetchrow(
+                """
+                INSERT INTO moex_spot_future_pairs (
+                    spot_name, spot_lot, spot_data_exp, price_ratio, spot_trade_lot, spot_dividend, discount,
+                    future_name, future_lot, future_data_exp, future_trade_lot
+                )
+                VALUES ($1, $2, NULL, $3, $7, $4, 1, $5, $7, $6, $2)
+                RETURNING id
+                """,
+                spot_name,
+                spot["lot_size"],
+                request.price_ratio,
+                request.spot_dividend,
+                future_name,
+                future["maturity_date"],
+                future["lot_size"],
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="Такая пара уже существует") from None
+    await _restart_market_subscriptions()
+    try:
+        await sync_forts_market_parameters([future_name])
+    except Exception as error:
+        print(f"Ошибка первичной загрузки ГО фьючерса MOEX для {future_name}: {error}", flush=True)
+    await _refresh_moex_metrics()
+    return {"id": row["id"]}
+
+
+@app.patch("/api/moex-spot-future-pairs/{pair_id}/manual-value")
+async def update_moex_spot_future_manual_value(
+    pair_id: int,
+    request: PairManualValueUpdate,
+    _: str = Depends(get_current_user),
+):
+    if request.field not in {"price_ratio", "spot_trade_lot", "future_trade_lot", "discount", "spot_dividend"}:
+        raise HTTPException(status_code=400, detail="Это поле нельзя изменить для пары MOEX")
+    if request.field == "discount" and not Decimal("0.08") <= request.value <= Decimal("1"):
+        raise HTTPException(status_code=422, detail="Discount должен быть в диапазоне от 0.08 до 1")
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        updated = await connection.fetchrow(
+            f"""
+            UPDATE moex_spot_future_pairs
+            SET {request.field} = $1,
+                spot_margin = CASE WHEN $2 = id AND $3 = 'discount'
+                    THEN spot_price * spot_lot * $1
+                    ELSE spot_margin END
+            WHERE id = $2
+            RETURNING {request.field}, spot_margin, diff, diff_percent, diff_ytm_margin, dte
+            """,
+            request.value,
+            pair_id,
+            request.field,
+        )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Пара MOEX не найдена")
+    await _refresh_moex_metrics()
+    async with pool.acquire() as connection:
+        metrics = await connection.fetchrow(
+            """
+            SELECT spot_margin, diff, diff_percent, diff_ytm_margin, dte
+            FROM moex_spot_future_pairs
+            WHERE id = $1
+            """,
+            pair_id,
+        )
+    return {
+        "value": updated[request.field],
+        "spot_margin": metrics["spot_margin"],
+        "diff": metrics["diff"],
+        "diff_percent": metrics["diff_percent"],
+        "diff_ytm_margin": metrics["diff_ytm_margin"],
+        "dte": metrics["dte"],
+    }
+
+
+@app.delete("/api/moex-spot-future-pairs/{pair_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_moex_spot_future_pair(
+    pair_id: int,
+    _: str = Depends(get_current_user),
+):
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        deleted = await connection.fetchval(
+            "DELETE FROM moex_spot_future_pairs WHERE id = $1 RETURNING id", pair_id
+        )
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Пара не найдена")
+    await _restart_market_subscriptions()
 
 
 @app.get("/api/currency-rates")
@@ -1140,6 +1491,7 @@ async def list_instrument_options(
     provider: str,
     query: str = "",
     limit: int = 20,
+    instrument_type: str | None = None,
     _: str = Depends(get_current_user),
 ):
     provider_normalized = provider.strip().lower()
@@ -1148,7 +1500,7 @@ async def list_instrument_options(
     if provider_normalized == "exante":
         items = await _search_exante_options(query, safe_limit)
     elif provider_normalized == "bcs":
-        items = await _search_bcs_options(query, safe_limit)
+        items = await _search_bcs_typed_options(query, safe_limit, instrument_type) if instrument_type else await _search_bcs_options(query, safe_limit)
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Неизвестный провайдер")
 

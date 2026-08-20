@@ -145,6 +145,23 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
             "WHERE id = $3",
             pair_updates,
         )
+        moex_pairs = await connection.fetch(
+            """
+            SELECT id, future_name
+            FROM moex_spot_future_pairs
+            WHERE future_name = ANY($1::varchar[])
+            """,
+            list(parameters_by_ticker),
+        )
+        await connection.executemany(
+            "UPDATE moex_spot_future_pairs "
+            "SET future_margin = COALESCE($1, future_margin) "
+            "WHERE id = $2",
+            [
+                (parameters_by_ticker[str(row["future_name"])][0], row["id"])
+                for row in moex_pairs
+            ],
+        )
     return len(updates)
 
 

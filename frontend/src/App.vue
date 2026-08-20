@@ -23,7 +23,11 @@
           <div><p class="eyebrow">МЕЖРЫНОЧНЫЙ АРБИТРАЖ</p><h1>Арбитражные пары</h1><p>Сравнение фьючерсных контрактов CME и FORTS</p></div>
           <div class="heading-metrics"><div><span>ПАР</span><strong>{{ pairs.length }}</strong></div><div><span>ОБНОВЛЕНО</span><strong>{{ updatedAt }}</strong></div></div>
         </section>
-        <section class="add-pair-row">
+        <nav class="table-tabs" aria-label="Тип таблицы">
+          <button type="button" :class="{ 'is-active': activeTable === 'exante_forts' }" @click="selectTable('exante_forts')">EXANTE / CME — FORTS</button>
+          <button type="button" :class="{ 'is-active': activeTable === 'moex_spot_future' }" @click="selectTable('moex_spot_future')">MOEX spot — MOEX futures</button>
+        </nav>
+        <section v-if="activeTable === 'exante_forts'" class="add-pair-row">
           <div><p class="section-label">НОВАЯ ПАРА</p><span>Выберите контракты из синхронизированных справочников EXANTE и BCS.</span></div>
           <form class="add-pair-form" @submit.prevent="addPair">
             <div class="pair-fields">
@@ -64,12 +68,12 @@
           </form>
         </section>
         <p v-if="tableError" class="form-error table-error">{{ tableError }}</p>
-        <section class="currency-rates" aria-label="Курсы MOEX">
+        <section v-if="activeTable === 'exante_forts'" class="currency-rates" aria-label="Курсы MOEX">
           <div class="currency-rates-title"><span>КУРСЫ MOEX</span><small>расчётный курс за {{ currencyRateDate }}</small></div>
           <div class="currency-rate" v-for="rate in currencyRates" :key="rate.currency_code"><strong>{{ rate.currency_code }}/RUB</strong><span>{{ formatNumber(rate.rate, 4) }} RUB</span></div>
           <span v-if="!currencyRates.length" class="currency-rates-empty">Курсы пока недоступны</span>
         </section>
-        <section class="table-section">
+        <section v-if="activeTable === 'exante_forts'" class="table-section">
           <div class="table-toolbar"><span><i></i> CME / FORTS</span><div class="table-toolbar-actions"><span>{{ pairs.length }} инструмент{{ pairEnding }}</span><button class="details-toggle" type="button" :aria-expanded="showContractDetails" @click="showContractDetails = !showContractDetails">{{ showContractDetails ? 'Скрыть параметры' : 'Параметры контрактов' }}</button></div></div>
           <div class="table-wrap"><table :class="{ 'is-compact': !showContractDetails }"><colgroup v-if="!showContractDetails"><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="contract-column" /><col class="date-column" /><col class="price-column" /><col class="ratio-column" /><col class="dte-column" /><col class="virt-column" /><col class="diff-column" /><col class="percent-column" /><col class="ytm-column" /><col class="action-column" /></colgroup><thead><tr>
             <th><span class="header-label">CME<br>name</span></th><th><span class="header-label">CME<br>exp</span></th><th><span class="header-label">CME<br>price</span></th><th v-if="showContractDetails"><span class="header-label">CME margin,<br>USD</span></th><th v-if="showContractDetails"><span class="header-label">CME<br>lot</span></th><th><span class="header-label">FORTS<br>name</span></th><th><span class="header-label">FORTS<br>exp</span></th><th><span class="header-label">FORTS<br>price</span></th><th><span class="header-label">Price<br>ratio</span></th><th v-if="showContractDetails"><span class="header-label">FORTS margin,<br>RUB</span></th><th v-if="showContractDetails"><span class="header-label">Price<br>step</span></th><th v-if="showContractDetails"><span class="header-label">Step<br>value</span></th><th v-if="showContractDetails"><span class="header-label">Trade<br>lot</span></th><th v-if="showContractDetails"><span class="header-label">Trade lot<br>currency</span></th><th>DTE</th><th>Virt_0</th><th :aria-sort="sortAria('diff')"><button type="button" class="sort-header" :class="{ 'is-active': sortColumn === 'diff' }" title="Сортировать по Diff" @click="sortPairs('diff')">Diff <span aria-hidden="true">{{ sortIcon('diff') }}</span></button></th><th :aria-sort="sortAria('diff_percent')"><button type="button" class="sort-header" :class="{ 'is-active': sortColumn === 'diff_percent' }" title="Сортировать по Diff, %" @click="sortPairs('diff_percent')"><span class="header-label">Diff,<br>%</span> <span aria-hidden="true">{{ sortIcon('diff_percent') }}</span></button></th><th :aria-sort="sortAria('diff_ytm_margin')"><button type="button" class="sort-header" :class="{ 'is-active': sortColumn === 'diff_ytm_margin' }" title="Сортировать по Diff, YTM" @click="sortPairs('diff_ytm_margin')"><span class="header-label">Diff,<br>YTM</span> <span aria-hidden="true">{{ sortIcon('diff_ytm_margin') }}</span></button></th><th aria-label="Действия"></th>
@@ -100,6 +104,61 @@
             </tr>
           </tbody></table></div>
         </section>
+        <template v-if="activeTable === 'moex_spot_future'">
+          <section class="add-pair-row">
+            <div><p class="section-label">НОВАЯ ПАРА</p><span>Выберите акцию или валюту и фьючерс из справочника MOEX.</span></div>
+            <form class="add-pair-form moex-pair-form" @submit.prevent="addMoexPair">
+              <div class="pair-fields">
+                <label class="pair-select combobox"><span class="pair-select-label">MOEX / spot акция или валюта</span>
+                  <div class="combobox-control">
+                    <input ref="spotInput" v-model="newSpotName" class="combobox-input" placeholder="Например SBER" maxlength="100" autocomplete="off" required @focus="onSpotFocus" @input="onSpotInput" @keydown="onSpotKeydown" @blur="onSpotBlur" />
+                    <ul v-if="spotOpen && spotMatches.length" class="combobox-menu" role="listbox">
+                      <li v-for="(match, index) in spotMatches" :key="match.value" role="option" :aria-selected="index === spotHighlight" :class="{ 'is-active': index === spotHighlight }" @mousedown.prevent="pickSpot(match)" @mouseenter="spotHighlight = index">
+                        <span class="combobox-value" v-html="highlightMatch(match.value, newSpotName)"></span><span class="combobox-details">{{ match.details }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                  <small class="pair-hint">{{ spotHint }}</small>
+                </label>
+                <label class="pair-select combobox"><span class="pair-select-label">MOEX / futures</span>
+                  <div class="combobox-control">
+                    <input ref="futureInput" v-model="newFutureName" class="combobox-input" placeholder="Например SRU6" maxlength="100" autocomplete="off" required @focus="onFutureFocus" @input="onFutureInput" @keydown="onFutureKeydown" @blur="onFutureBlur" />
+                    <ul v-if="futureOpen && futureMatches.length" class="combobox-menu" role="listbox">
+                      <li v-for="(match, index) in futureMatches" :key="match.value" role="option" :aria-selected="index === futureHighlight" :class="{ 'is-active': index === futureHighlight }" @mousedown.prevent="pickFuture(match)" @mouseenter="futureHighlight = index">
+                        <span class="combobox-value" v-html="highlightMatch(match.value, newFutureName)"></span><span class="combobox-details">{{ match.details }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                  <small class="pair-hint">{{ futureHint }}</small>
+                </label>
+              </div>
+              <button class="primary-button" :disabled="addingMoexPair">{{ addingMoexPair ? 'Добавление...' : 'Добавить пару' }}</button>
+            </form>
+          </section>
+          <section class="table-section">
+            <div class="table-toolbar"><span><i></i> MOEX SPOT / FUTURES</span><div class="table-toolbar-actions"><span>{{ moexPairs.length }} инструмент{{ moexPairEnding }}</span><button class="details-toggle" type="button" :aria-expanded="moexShowContractDetails" @click="moexShowContractDetails = !moexShowContractDetails">{{ moexShowContractDetails ? 'Скрыть параметры' : 'Параметры контрактов' }}</button></div></div>
+            <div class="table-wrap"><table class="moex-table" :class="{ 'is-compact': !moexShowContractDetails }"><thead><tr>
+              <th>Spot name</th><th>Spot price</th><th v-if="moexShowContractDetails">Discount</th><th>Spot margin</th><th v-if="moexShowContractDetails">Spot lot</th><th v-if="moexShowContractDetails">Spot exp</th><th>Price ratio</th><th v-if="moexShowContractDetails">Spot trade lot</th><th v-if="moexShowContractDetails">Dividend</th><th>Future name</th><th>Future price</th><th>Future margin</th><th v-if="moexShowContractDetails">Future lot</th><th v-if="moexShowContractDetails">Future exp</th><th v-if="moexShowContractDetails">Future trade lot</th><th>DTE</th><th>Diff</th><th>Diff, %</th><th>Diff, YTM</th><th></th>
+            </tr></thead><tbody>
+              <tr v-if="moexLoading"><td :colspan="moexVisibleColumnCount" class="empty-state">Загрузка данных...</td></tr>
+              <tr v-else-if="!moexPairs.length"><td :colspan="moexVisibleColumnCount" class="empty-state">Пар MOEX spot — futures пока нет.</td></tr>
+              <tr v-for="pair in moexPairs" :key="pair.id">
+                <td class="instrument">{{ pair.spot_name }}</td><td>{{ formatExactNumber(pair.spot_price) }}</td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'discount') }" @click="startCellEdit(pair, 'discount')"><input v-if="isEditingCell(pair.id, 'discount')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexCellEdit(pair)" @keydown.enter.prevent="saveMoexCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.discount, 4) }}</span></td><td>{{ formatNumber(pair.spot_margin, 4) }}</td><td>{{ formatNumber(pair.spot_lot, 4) }}</td><td>{{ formatDate(pair.spot_data_exp) }}</td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'price_ratio') }" @click="startCellEdit(pair, 'price_ratio')"><input v-if="isEditingCell(pair.id, 'price_ratio')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexCellEdit(pair)" @keydown.enter.prevent="saveMoexCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.price_ratio, 4) }}</span></td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'spot_trade_lot') }" @click="startCellEdit(pair, 'spot_trade_lot')"><input v-if="isEditingCell(pair.id, 'spot_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexCellEdit(pair)" @keydown.enter.prevent="saveMoexCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.spot_trade_lot, 4) }}</span></td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'spot_dividend') }" @click="startCellEdit(pair, 'spot_dividend')"><input v-if="isEditingCell(pair.id, 'spot_dividend')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexCellEdit(pair)" @keydown.enter.prevent="saveMoexCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.spot_dividend, 4) }}</span></td><td class="instrument">{{ pair.future_name }}</td><td>{{ formatExactNumber(pair.future_price) }}</td><td>{{ formatNumber(pair.future_margin, 4) }}</td><td>{{ formatNumber(pair.future_lot, 4) }}</td><td>{{ formatDate(pair.future_data_exp) }}</td><td class="editable-cell" :class="{ 'is-invalid': isInvalidCell(pair.id, 'future_trade_lot') }" @click="startCellEdit(pair, 'future_trade_lot')"><input v-if="isEditingCell(pair.id, 'future_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexCellEdit(pair)" @keydown.enter.prevent="saveMoexCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.future_trade_lot, 4) }}</span></td><td>{{ pair.dte ?? '—' }}</td><td :class="numberClass(pair.diff)">{{ formatExactNumber(pair.diff) }}</td><td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td><td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td><td class="pair-action"><button class="delete-pair-button" type="button" title="Удалить пару" @click="deleteMoexPair(pair)">×</button></td>
+              </tr>
+            </tbody></table></div>
+          </section>
+          <section class="calculation-legend" aria-label="Формулы расчёта MOEX spot-futures">
+            <div class="calculation-legend-title">ЛЕГЕНДА РАСЧЁТА</div>
+            <div class="calculation-legend-grid">
+              <div><strong>Spot margin</strong><span>Spot price × Spot lot × Discount</span></div>
+              <div><strong>Diff</strong><span>Future price − Spot price × Price ratio + Dividend</span></div>
+              <div><strong>DTE</strong><span>Количество дней до ближайшей даты экспирации Spot или Future</span></div>
+              <div><strong>Акция — Diff, %</strong><span>Diff / (Spot margin × Spot trade lot + Future margin)</span></div>
+              <div><strong>Валюта — Diff, %</strong><span>Diff × Spot lot / max(Spot margin × Spot trade lot; Future margin × Future trade lot)</span></div>
+              <div><strong>Diff, YTM</strong><span>Diff, % / DTE × 365</span></div>
+            </div>
+          </section>
+        </template>
       </main>
     </template>
   </div>
@@ -118,6 +177,29 @@ const loading = ref(false)
 const addingPair = ref(false)
 const tableError = ref('')
 const pairs = ref([])
+const moexPairs = ref([])
+const savedTable = localStorage.getItem('arbitrage_active_table')
+const activeTable = ref(savedTable === 'moex_spot_future' ? savedTable : 'exante_forts')
+const moexLoading = ref(false)
+const addingMoexPair = ref(false)
+const newSpotName = ref('')
+const newFutureName = ref('')
+const spotOptions = ref([])
+const futureOptions = ref([])
+const spotHint = ref('Начните вводить тикер акции или валюты MOEX.')
+const futureHint = ref('Начните вводить тикер фьючерса MOEX.')
+const spotOpen = ref(false)
+const spotHighlight = ref(-1)
+const spotMatches = ref([])
+const spotTotal = ref(0)
+const spotSuggestion = ref('')
+const spotInput = ref(null)
+const futureOpen = ref(false)
+const futureHighlight = ref(-1)
+const futureMatches = ref([])
+const futureTotal = ref(0)
+const futureSuggestion = ref('')
+const futureInput = ref(null)
 const sortColumn = ref(null)
 const sortDirection = ref('desc')
 const newCmeName = ref('')
@@ -145,6 +227,7 @@ const editingCell = ref(null)
 const editorInput = ref(null)
 const invalidCells = ref({})
 const showContractDetails = ref(false)
+const moexShowContractDetails = ref(false)
 const deletingPairId = ref(null)
 let priceEvents = null
 let priceRefreshTimer = null
@@ -161,7 +244,7 @@ async function login() {
     if (!response.ok) throw new Error(data.detail || 'Не удалось выполнить вход')
     token.value = data.access_token; username.value = data.username
     localStorage.setItem('arbitrage_token', token.value); localStorage.setItem('arbitrage_username', username.value)
-    await Promise.all([loadPairs(), loadCurrencyRates()]); connectPriceEvents()
+    await Promise.all([loadPairs(), loadCurrencyRates(), loadInstrumentOptions('bcs', '', 'SPOT'), loadInstrumentOptions('bcs', '', 'FUTURES')]); connectPriceEvents()
   } catch (error) { loginError.value = error.message } finally { loginPending.value = false }
 }
 async function loadPairs(showLoading = true) {
@@ -175,6 +258,41 @@ async function loadPairs(showLoading = true) {
     pairs.value = data.pairs
     updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
   } catch (error) { tableError.value = error.message } finally { if (showLoading) loading.value = false }
+}
+async function loadMoexPairs(showLoading = true) {
+  if (showLoading) moexLoading.value = true
+  tableError.value = ''
+  try {
+    const response = await fetch('/api/moex-spot-future-pairs', { headers: authHeaders() })
+    if (response.status === 401) return logout()
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Не удалось получить пары MOEX')
+    moexPairs.value = data.pairs
+    updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
+  } catch (error) { tableError.value = error.message } finally { if (showLoading) moexLoading.value = false }
+}
+function selectTable(table) {
+  activeTable.value = table
+  localStorage.setItem('arbitrage_active_table', table)
+  if (table === 'moex_spot_future' && !moexPairs.value.length) loadMoexPairs()
+}
+async function addMoexPair() {
+  addingMoexPair.value = true; tableError.value = ''
+  try {
+    const response = await fetch('/api/moex-spot-future-pairs', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ spot_name: newSpotName.value.trim().toUpperCase(), future_name: newFutureName.value.trim().toUpperCase() }) })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Не удалось добавить пару MOEX')
+    newSpotName.value = ''; newFutureName.value = ''; await loadMoexPairs()
+  } catch (error) { tableError.value = error.message } finally { addingMoexPair.value = false }
+}
+async function deleteMoexPair(pair) {
+  if (!window.confirm(`Удалить пару ${pair.spot_name} / ${pair.future_name}?`)) return
+  try {
+    const response = await fetch(`/api/moex-spot-future-pairs/${pair.id}`, { method: 'DELETE', headers: authHeaders() })
+    if (response.status === 401) return logout()
+    if (!response.ok) throw new Error('Не удалось удалить пару MOEX')
+    moexPairs.value = moexPairs.value.filter(item => item.id !== pair.id)
+  } catch (error) { tableError.value = error.message }
 }
 async function loadCurrencyRates() {
   try {
@@ -198,6 +316,7 @@ function schedulePriceRefresh() {
   if (remaining <= 0) {
     lastPriceRefresh = now
     loadPairs(false)
+    loadMoexPairs(false)
     loadCurrencyRates()
     return
   }
@@ -208,6 +327,7 @@ function schedulePriceRefresh() {
     priceRefreshTimer = null
     lastPriceRefresh = Date.now()
     loadPairs(false)
+    loadMoexPairs(false)
     loadCurrencyRates()
   }, remaining)
 }
@@ -259,6 +379,7 @@ function validateManualValue(field, value) {
   if (!normalized || !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(normalized)) return null
   const parsed = Number(normalized)
   if (!Number.isFinite(parsed) || field === 'cme_margin_usd' && parsed < 0) return null
+  if (field === 'discount' && (parsed < 0.08 || parsed > 1)) return null
   return normalized
 }
 async function saveCellEdit(pair) {
@@ -288,10 +409,42 @@ async function saveCellEdit(pair) {
     nextTick(() => editorInput.value?.focus())
   }
 }
-async function loadInstrumentOptions(provider, query = '') {
+async function saveMoexCellEdit(pair) {
+  const edit = editingCell.value
+  if (!edit || edit.pairId !== pair.id) return
+  const normalizedValue = validateManualValue(edit.field, edit.value)
+  const key = cellKey(edit.pairId, edit.field)
+  if (normalizedValue === null) {
+    invalidCells.value[key] = true
+    nextTick(() => editorInput.value?.focus())
+    return
+  }
+  try {
+    const response = await fetch(`/api/moex-spot-future-pairs/${pair.id}/manual-value`, {
+      method: 'PATCH',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field: edit.field, value: normalizedValue }),
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Не удалось сохранить значение')
+    pair[edit.field] = data.value
+    if (edit.field === 'discount' && data.spot_margin !== undefined) pair.spot_margin = data.spot_margin
+    for (const field of ['diff', 'diff_percent', 'diff_ytm_margin', 'dte']) {
+      if (data[field] !== undefined) pair[field] = data[field]
+    }
+    delete invalidCells.value[key]
+    editingCell.value = null
+  } catch (error) {
+    invalidCells.value[key] = true
+    tableError.value = error.message || 'Не удалось сохранить значение'
+    nextTick(() => editorInput.value?.focus())
+  }
+}
+async function loadInstrumentOptions(provider, query = '', instrumentType = '') {
   if (!token.value) return
   try {
-    const response = await fetch(`/api/instrument-options?provider=${encodeURIComponent(provider)}&query=${encodeURIComponent(query)}&limit=20000`, { headers: authHeaders() })
+    const typeQuery = instrumentType ? `&instrument_type=${encodeURIComponent(instrumentType)}` : ''
+    const response = await fetch(`/api/instrument-options?provider=${encodeURIComponent(provider)}&query=${encodeURIComponent(query)}&limit=20000${typeQuery}`, { headers: authHeaders() })
     if (response.status === 401) return logout()
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || 'Не удалось получить список тикеров')
@@ -300,8 +453,14 @@ async function loadInstrumentOptions(provider, query = '') {
       exanteOptions.value = items
       updateCmeMatches()
     } else {
-      bcsOptions.value = items
-      updateFortsMatches()
+      if (instrumentType === 'SPOT') {
+        spotOptions.value = items
+      } else if (instrumentType === 'FUTURES') {
+        futureOptions.value = items
+      } else {
+        bcsOptions.value = items
+        updateFortsMatches()
+      }
     }
   } catch (error) {
     const message = error.message || 'Не удалось получить список тикеров'
@@ -419,6 +578,20 @@ function updateFortsMatches() {
     providerLabel: 'BCS', emptyHint: 'Начните вводить тикер BCS.',
   })
 }
+function updateSpotMatches() {
+  updateCombobox({
+    options: spotOptions, query: newSpotName, matches: spotMatches, total: spotTotal,
+    highlight: spotHighlight, suggestion: spotSuggestion, hint: spotHint,
+    providerLabel: 'MOEX spot', emptyHint: 'Начните вводить тикер акции или валюты MOEX.',
+  })
+}
+function updateFutureMatches() {
+  updateCombobox({
+    options: futureOptions, query: newFutureName, matches: futureMatches, total: futureTotal,
+    highlight: futureHighlight, suggestion: futureSuggestion, hint: futureHint,
+    providerLabel: 'MOEX фьючерсы', emptyHint: 'Начните вводить тикер фьючерса MOEX.',
+  })
+}
 function highlightMatch(value, query) {
   const foldedQuery = String(query || '').trim().toLowerCase()
   if (!foldedQuery) return escapeHtml(value)
@@ -534,7 +707,37 @@ function onFortsKeydown(event) {
     }
   }
 }
-function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
+function onSpotFocus() {
+  spotOpen.value = true
+  if (spotOptions.value.length) updateSpotMatches()
+  else loadInstrumentOptions('bcs', '', 'SPOT').then(() => { updateSpotMatches(); spotOpen.value = true })
+}
+function onSpotInput(event) { upperCaseField(event, newSpotName); spotOpen.value = true; updateSpotMatches() }
+function onSpotBlur() { setTimeout(() => { spotOpen.value = false; spotHighlight.value = -1 }, 150) }
+function pickSpot(match) { newSpotName.value = match.value; spotOpen.value = false; nextTick(() => spotInput.value?.focus()) }
+function onSpotKeydown(event) {
+  if (event.key === 'ArrowDown') { event.preventDefault(); spotOpen.value = true; if (spotMatches.value.length) spotHighlight.value = Math.min(spotHighlight.value + 1, spotMatches.value.length - 1) }
+  else if (event.key === 'ArrowUp') { event.preventDefault(); spotOpen.value = true; if (spotMatches.value.length) spotHighlight.value = Math.max(spotHighlight.value - 1, 0) }
+  else if (event.key === 'Escape') { event.preventDefault(); spotOpen.value = false; spotHighlight.value = -1 }
+  else if (event.key === 'Tab' && spotSuggestion.value) { event.preventDefault(); newSpotName.value = spotSuggestion.value; updateSpotMatches(); spotOpen.value = true }
+  else if (event.key === 'Enter' && spotOpen.value && spotMatches.value.length) { const target = spotMatches.value[Math.max(spotHighlight.value, 0)]; if (target && target.value.toLowerCase() === newSpotName.value.trim().toLowerCase()) { spotOpen.value = false; return }; event.preventDefault(); pickSpot(target) }
+}
+function onFutureFocus() {
+  futureOpen.value = true
+  if (futureOptions.value.length) updateFutureMatches()
+  else loadInstrumentOptions('bcs', '', 'FUTURES').then(() => { updateFutureMatches(); futureOpen.value = true })
+}
+function onFutureInput(event) { upperCaseField(event, newFutureName); futureOpen.value = true; updateFutureMatches() }
+function onFutureBlur() { setTimeout(() => { futureOpen.value = false; futureHighlight.value = -1 }, 150) }
+function pickFuture(match) { newFutureName.value = match.value; futureOpen.value = false; nextTick(() => futureInput.value?.focus()) }
+function onFutureKeydown(event) {
+  if (event.key === 'ArrowDown') { event.preventDefault(); futureOpen.value = true; if (futureMatches.value.length) futureHighlight.value = Math.min(futureHighlight.value + 1, futureMatches.value.length - 1) }
+  else if (event.key === 'ArrowUp') { event.preventDefault(); futureOpen.value = true; if (futureMatches.value.length) futureHighlight.value = Math.max(futureHighlight.value - 1, 0) }
+  else if (event.key === 'Escape') { event.preventDefault(); futureOpen.value = false; futureHighlight.value = -1 }
+  else if (event.key === 'Tab' && futureSuggestion.value) { event.preventDefault(); newFutureName.value = futureSuggestion.value; updateFutureMatches(); futureOpen.value = true }
+  else if (event.key === 'Enter' && futureOpen.value && futureMatches.value.length) { const target = futureMatches.value[Math.max(futureHighlight.value, 0)]; if (target && target.value.toLowerCase() === newFutureName.value.trim().toLowerCase()) { futureOpen.value = false; return }; event.preventDefault(); pickFuture(target) }
+}
+function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; moexPairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
 function formatDate(value) { return value ? new Intl.DateTimeFormat('ru-RU').format(new Date(`${value}T00:00:00`)) : '—' }
 function formatNumber(value, maximumFractionDigits = 2) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits }).format(value) }
 function formatExactNumber(value) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 20 }).format(value) }
@@ -560,8 +763,10 @@ const sortedPairs = computed(() => {
 })
 const currencyRateDate = computed(() => currencyRates.value[0]?.rate_date ? formatDate(currencyRates.value[0].rate_date) : '—')
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
+const moexPairEnding = computed(() => { const remainder = moexPairs.value.length % 10; return remainder === 1 && moexPairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
 const visibleColumnCount = computed(() => showContractDetails.value ? 20 : 13)
-onMounted(() => { if (authenticated.value) { loadPairs(); loadCurrencyRates(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs') } })
+const moexVisibleColumnCount = computed(() => moexShowContractDetails.value ? 20 : 12)
+onMounted(() => { if (authenticated.value) { loadPairs(); if (activeTable.value === 'moex_spot_future') loadMoexPairs(); loadCurrencyRates(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs'); loadInstrumentOptions('bcs', '', 'SPOT'); loadInstrumentOptions('bcs', '', 'FUTURES') } })
 onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
 </script>
 
@@ -578,12 +783,12 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .combobox-control { position: relative; margin-top: 7px; }
 .pair-select .combobox-control { margin-top: 0; }
 .combobox-input { position: relative; z-index: 2; margin-top: 0 !important; }
-.combobox-menu { position: absolute; z-index: 30; top: 100%; left: 0; right: 0; max-height: 280px; margin: 4px 0 0; padding: 4px 0; overflow-y: auto; border: 1px solid #35423d; border-top: 2px solid #77d6b6; background: #101514; list-style: none; text-transform: none; box-shadow: 0 18px 44px rgba(0, 0, 0, .45); }
-.combobox-menu li { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; cursor: pointer; }
+.combobox-menu { position: absolute; z-index: 30; top: 100%; left: 0; width: max-content; min-width: 100%; max-width: calc(100vw - 28px); max-height: 280px; margin: 4px 0 0; padding: 4px 0; overflow-x: auto; overflow-y: auto; border: 1px solid #35423d; border-top: 2px solid #77d6b6; background: #101514; list-style: none; text-transform: none; box-shadow: 0 18px 44px rgba(0, 0, 0, .45); }
+.combobox-menu li { display: flex; width: max-content; min-width: 100%; align-items: baseline; gap: 8px; padding: 8px 12px; cursor: pointer; }
 .combobox-menu li.is-active { background: #1a2420; }
 .combobox-value { color: #eef6f1; font: 500 12px 'IBM Plex Mono', monospace; white-space: nowrap; }
 .combobox-value mark { color: #77d6b6; background: rgba(119, 214, 182, .12); padding: 0 1px; }
-.combobox-details { flex: 1; min-width: 0; overflow: hidden; color: #7f8d86; font: 11px 'IBM Plex Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+.combobox-details { flex: none; color: #7f8d86; font: 11px 'IBM Plex Mono', monospace; white-space: nowrap; }
 .add-pair-form .primary-button { white-space: nowrap; } .table-section { border: 1px solid #35423d; background: #141a18; } .table-toolbar { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #35423d; color: #aeb9b3; font: 12px 'IBM Plex Mono', monospace; } .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font: 12px 'IBM Plex Mono', monospace; } th { padding: 13px 12px; color: #84948c; font-weight: 500; text-align: right; white-space: nowrap; background: #171e1b; } td { padding: 14px 12px; color: #dbe4df; text-align: right; white-space: nowrap; border-top: 1px solid #28322e; } th:first-child, th:nth-child(7), td:first-child, td:nth-child(7) { text-align: left; } tbody tr:hover { background: #1a2420; } .instrument { color: #f0f7f3; font-weight: 600; } .positive { color: #75dbb6; } .negative { color: #ff9989; } .editable-cell { cursor: text; outline: 1px dashed transparent; outline-offset: -4px; } .editable-cell:hover { outline-color: #587269; background: #18221e; } .editable-cell input { width: 100%; min-width: 72px; margin: -7px 0; border-color: #77d6b6; padding: 6px 7px; text-align: right; font: inherit; } .editable-cell.is-invalid { color: #ff9d8b; outline-color: #ff7567; background: rgba(158, 54, 44, .24); } .editable-cell.is-invalid input { border-color: #ff7567; } .empty-state { padding: 35px; color: #8f9d96; text-align: center !important; } .table-error { margin-bottom: 14px; }
 .currency-rates { display: flex; align-items: stretch; margin-bottom: 18px; border: 1px solid #35423d; background: #161d1a; font: 12px 'IBM Plex Mono', monospace; } .currency-rates-title, .currency-rate { display: flex; flex-direction: column; justify-content: center; padding: 12px 16px; border-right: 1px solid #35423d; } .currency-rates-title { min-width: 215px; color: #77d6b6; letter-spacing: .6px; } .currency-rates-title small, .currency-rates-empty { margin-top: 4px; color: #7f8d86; font-size: 11px; letter-spacing: 0; } .currency-rate { min-width: 150px; gap: 4px; } .currency-rate strong { color: #aeb9b3; font-weight: 500; } .currency-rate span { color: #e4eee9; font-size: 14px; font-weight: 600; } .currency-rates-empty { align-self: center; margin: 0; padding: 0 16px; }
 .table-toolbar { align-items: center; gap: 12px; padding: 10px 12px; } .table-toolbar-actions { display: flex; align-items: center; gap: 12px; } .details-toggle { border: 1px solid #46574f; border-radius: 2px; padding: 6px 8px; color: #b9c7c0; background: #19211e; font: 11px 'IBM Plex Mono', monospace; } .details-toggle:hover { border-color: #77d6b6; color: #e7f4ed; } th, td { text-align: center !important; } th { padding: 9px 8px; line-height: 1.25; } .header-label { display: inline-block; } .sort-header { display: inline-flex; align-items: center; justify-content: center; gap: 3px; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; text-align: inherit; } .sort-header:hover, .sort-header:focus-visible, .sort-header.is-active { color: #77d6b6; } .sort-header:focus-visible { outline: 1px solid #77d6b6; outline-offset: 3px; } table.is-compact { min-width: 920px; table-layout: fixed; } .contract-column { width: 14%; } .date-column { width: 9%; } .price-column, .ratio-column { width: 8%; } .dte-column, .percent-column { width: 5%; } .virt-column, .diff-column { width: 7%; } .ytm-column { width: 6%; } .action-column { width: 4%; } td { max-width: 132px; padding: 10px 8px; } .instrument { display: block; max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; } .editable-cell input { min-width: 64px; margin: -5px 0; padding: 5px 6px; } .trade-lot-currency { border: 1px solid #46574f; border-radius: 2px; padding: 5px 6px; color: #dbe4df; background: #19211e; font: inherit; } .trade-lot-currency:focus { border-color: #77d6b6; outline: none; } .trade-lot-currency:disabled { cursor: wait; opacity: .6; } .pair-action { padding: 0 4px; } .delete-pair-button { width: 24px; height: 24px; border: 1px solid transparent; border-radius: 2px; padding: 0; color: #87958e; background: transparent; font: 500 18px/1 'IBM Plex Mono', monospace; } .delete-pair-button:hover:not(:disabled) { border-color: #a85850; color: #ff9989; background: rgba(158, 54, 44, .18); } .delete-pair-button:disabled { cursor: wait; opacity: .45; }
@@ -605,4 +810,26 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .pair-currency-select:focus { border-color: #77d6b6; outline: none; }
 .add-pair-form .primary-button { align-self: flex-start; height: 40px; margin-top: 21px; padding: 0 16px; }
 @media (max-width: 700px) { .add-pair-form .primary-button { margin-top: 0; } }
+.table-tabs { display: flex; gap: 2px; margin-bottom: 18px; border-bottom: 1px solid #35423d; }
+.table-tabs button { border: 1px solid transparent; border-bottom: 0; border-radius: 2px 2px 0 0; padding: 11px 14px; color: #7f8d86; background: transparent; font: 11px 'IBM Plex Mono', monospace; }
+.table-tabs button:hover, .table-tabs button.is-active { color: #dff3e9; border-color: #35423d; background: #19201e; }
+.table-tabs button.is-active { color: #77d6b6; border-top-color: #77d6b6; }
+.moex-table { min-width: 1680px; }
+.moex-table.is-compact { min-width: 920px; table-layout: fixed; }
+.moex-table.is-compact td:nth-child(3),
+.moex-table.is-compact td:nth-child(5),
+.moex-table.is-compact td:nth-child(6),
+.moex-table.is-compact td:nth-child(8),
+.moex-table.is-compact td:nth-child(9),
+.moex-table.is-compact td:nth-child(13),
+.moex-table.is-compact td:nth-child(14),
+.moex-table.is-compact td:nth-child(15) { display: none; }
+.calculation-legend { margin-top: 12px; border: 1px solid #35423d; background: #141a18; }
+.calculation-legend-title { padding: 10px 12px; border-bottom: 1px solid #35423d; color: #77d6b6; font: 600 10px 'IBM Plex Mono', monospace; letter-spacing: 1px; }
+.calculation-legend-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: #35423d; }
+.calculation-legend-grid div { min-width: 0; padding: 11px 12px; background: #19211e; }
+.calculation-legend-grid strong { display: block; margin-bottom: 5px; color: #dbe4df; font: 500 11px 'IBM Plex Mono', monospace; }
+.calculation-legend-grid span { display: block; color: #8f9d96; font: 11px/1.45 'IBM Plex Mono', monospace; }
+@media (max-width: 900px) { .calculation-legend-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .calculation-legend-grid { grid-template-columns: 1fr; } }
 </style>
