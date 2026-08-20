@@ -834,17 +834,7 @@ async def _save_moex_market_price(instrument: str, price: object) -> None:
                 spot_margin = CASE WHEN spot_name = $2
                     THEN $1 * spot_lot * COALESCE(discount, 1)
                     ELSE spot_margin END,
-                future_price = CASE WHEN future_name = $2 THEN $1 ELSE future_price END,
-                price_ratio = CASE
-                    WHEN COALESCE(price_ratio, 0) = 0
-                        AND COALESCE(CASE WHEN spot_name = $2 THEN $1 ELSE spot_price END, 0) <> 0
-                        AND COALESCE(CASE WHEN future_name = $2 THEN $1 ELSE future_price END, 0) <> 0
-                    THEN ROUND(
-                        CASE WHEN future_name = $2 THEN $1 ELSE future_price END /
-                        CASE WHEN spot_name = $2 THEN $1 ELSE spot_price END, 0
-                    )
-                    ELSE price_ratio
-                END
+                future_price = CASE WHEN future_name = $2 THEN $1 ELSE future_price END
             WHERE spot_name = $2 OR future_name = $2
             RETURNING id
             """,
