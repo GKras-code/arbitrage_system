@@ -87,7 +87,6 @@ class PairCreateRequest(BaseModel):
 class MoexSpotFuturePairCreateRequest(BaseModel):
     spot_name: str = Field(min_length=1, max_length=100)
     future_name: str = Field(min_length=1, max_length=100)
-    price_ratio: Decimal | None = None
     spot_dividend: Decimal = Decimal("0")
 
 
@@ -430,8 +429,6 @@ async def initialize_database() -> None:
                 discount NUMERIC(18, 6) NOT NULL DEFAULT 1,
                 spot_margin NUMERIC(18, 6),
                 spot_lot NUMERIC(18, 6),
-                spot_data_exp DATE,
-                price_ratio NUMERIC(18, 6),
                 spot_trade_lot NUMERIC(18, 6),
                 spot_dividend NUMERIC(18, 6) NOT NULL DEFAULT 0,
                 future_name VARCHAR(100) NOT NULL,
@@ -460,6 +457,14 @@ async def initialize_database() -> None:
         await connection.execute(
             "ALTER TABLE moex_spot_future_pairs "
             "ADD COLUMN IF NOT EXISTS discount NUMERIC(18, 6) NOT NULL DEFAULT 1"
+        )
+        await connection.execute(
+            "ALTER TABLE moex_spot_future_pairs "
+            "DROP COLUMN IF EXISTS spot_data_exp"
+        )
+        await connection.execute(
+            "ALTER TABLE moex_spot_future_pairs "
+            "DROP COLUMN IF EXISTS price_ratio"
         )
         await connection.execute(
             """
@@ -572,18 +577,13 @@ async def _refresh_moex_metrics() -> bool:
             """
             WITH base AS (
                 SELECT pairs.id,
-                       CASE
-                           WHEN pairs.spot_data_exp IS NULL AND pairs.future_data_exp IS NULL THEN NULL
-                           WHEN pairs.spot_data_exp IS NULL THEN pairs.future_data_exp - CURRENT_DATE
-                           WHEN pairs.future_data_exp IS NULL THEN pairs.spot_data_exp - CURRENT_DATE
-                           ELSE LEAST(pairs.spot_data_exp, pairs.future_data_exp) - CURRENT_DATE
-                       END AS dte,
+                       pairs.future_data_exp - CURRENT_DATE AS dte,
                        pairs.spot_price,
-                       pairs.price_ratio,
                        pairs.spot_dividend,
                        pairs.future_price,
                        pairs.spot_margin,
                        pairs.spot_lot,
+                       pairs.future_lot,
                        pairs.spot_trade_lot,
                        pairs.future_margin,
                        pairs.future_trade_lot,
@@ -594,9 +594,9 @@ async def _refresh_moex_metrics() -> bool:
             calculated AS (
                 SELECT *,
                        CASE
-                           WHEN spot_price IS NOT NULL AND price_ratio IS NOT NULL
-                                AND future_price IS NOT NULL
-                           THEN future_price - spot_price * price_ratio + COALESCE(spot_dividend, 0)
+                          WHEN spot_price IS NOT NULL AND spot_lot IS NOT NULL AND spot_lot <> 0
+                              AND future_lot IS NOT NULL AND future_price IS NOT NULL
+                          THEN future_price - spot_price * future_lot / spot_lot + COALESCE(spot_dividend, 0)
                        END AS diff
                 FROM base
             ),
@@ -1184,8 +1184,8 @@ async def list_moex_spot_future_pairs(_: str = Depends(get_current_user)):
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
-            SELECT id, spot_name, spot_price, discount, spot_margin, spot_lot, spot_data_exp,
-                   price_ratio, spot_trade_lot, spot_dividend,
+            SELECT id, spot_name, spot_price, discount, spot_margin, spot_lot,
+                     spot_trade_lot, spot_dividend,
                    future_name, future_price, future_margin, future_lot, future_data_exp,
                    future_trade_lot, dte, diff, diff_percent, diff_ytm_margin
             FROM moex_spot_future_pairs
@@ -1223,15 +1223,14 @@ async def create_moex_spot_future_pair(
             row = await connection.fetchrow(
                 """
                 INSERT INTO moex_spot_future_pairs (
-                    spot_name, spot_lot, spot_data_exp, price_ratio, spot_trade_lot, spot_dividend, discount,
+                    spot_name, spot_lot, spot_trade_lot, spot_dividend, discount,
                     future_name, future_lot, future_data_exp, future_trade_lot
                 )
-                VALUES ($1, $2, NULL, $3, $7, $4, 1, $5, $7, $6, $2)
+                VALUES ($1, $2, $6, $3, 1, $4, $6, $5, $2)
                 RETURNING id
                 """,
                 spot_name,
                 spot["lot_size"],
-                request.price_ratio,
                 request.spot_dividend,
                 future_name,
                 future["maturity_date"],
@@ -1254,7 +1253,7 @@ async def update_moex_spot_future_manual_value(
     request: PairManualValueUpdate,
     _: str = Depends(get_current_user),
 ):
-    if request.field not in {"price_ratio", "spot_trade_lot", "future_trade_lot", "discount", "spot_dividend"}:
+    if request.field not in {"spot_trade_lot", "future_trade_lot", "discount", "spot_dividend"}:
         raise HTTPException(status_code=400, detail="Это поле нельзя изменить для пары MOEX")
     if request.field == "discount" and not Decimal("0.08") <= request.value <= Decimal("1"):
         raise HTTPException(status_code=422, detail="Discount должен быть в диапазоне от 0.08 до 1")
