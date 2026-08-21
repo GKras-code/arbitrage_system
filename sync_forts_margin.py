@@ -82,7 +82,7 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
     if tickers is None:
         async with pool.acquire() as connection:
             rows = await connection.fetch(
-                "SELECT DISTINCT forts_name FROM arbitrage_pairs "
+                "SELECT DISTINCT forts_name FROM cme_future_pairs "
                 "WHERE COALESCE(forts_name, '') <> ''"
             )
         ticker_list = [str(row["forts_name"]) for row in rows]
@@ -121,7 +121,7 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
             """
             SELECT pairs.id, pairs.forts_name, pairs.trade_lot_currency,
                    rates.rate AS currency_rate
-            FROM arbitrage_pairs AS pairs
+            FROM cme_future_pairs AS pairs
             LEFT JOIN currency_rates AS rates
                 ON rates.currency_code = pairs.trade_lot_currency
             WHERE pairs.forts_name = ANY($1::varchar[])
@@ -139,7 +139,7 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
             for margin, step_price in [parameters_by_ticker[str(row["forts_name"])]]
         ]
         await connection.executemany(
-            "UPDATE arbitrage_pairs "
+            "UPDATE cme_future_pairs "
             "SET forts_margin_rub = COALESCE($1, forts_margin_rub), "
             "forts_price_step_value = COALESCE($2, forts_price_step_value) "
             "WHERE id = $3",

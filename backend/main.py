@@ -384,12 +384,12 @@ async def initialize_database() -> None:
                 """
                 SELECT column_name
                 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'arbitrage_pairs'
+                WHERE table_schema = 'public' AND table_name = 'cme_future_pairs'
                 """
             )
         }
         if existing_columns and not existing_columns <= ARBITRAGE_PAIR_COLUMNS:
-            await connection.execute("DROP TABLE arbitrage_pairs CASCADE")
+            await connection.execute("DROP TABLE cme_future_pairs CASCADE")
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -399,7 +399,7 @@ async def initialize_database() -> None:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
-            CREATE TABLE IF NOT EXISTS arbitrage_pairs (
+            CREATE TABLE IF NOT EXISTS cme_future_pairs (
                 id BIGSERIAL PRIMARY KEY,
                 cme_name VARCHAR(100) NOT NULL,
                 cme_data_exp DATE,
@@ -469,7 +469,7 @@ async def initialize_database() -> None:
         )
         await connection.execute(
             """
-            ALTER TABLE arbitrage_pairs
+            ALTER TABLE cme_future_pairs
             ADD COLUMN IF NOT EXISTS trade_lot_currency VARCHAR(3) NOT NULL DEFAULT 'USD'
                 CHECK (trade_lot_currency IN ('USD', 'CNY'))
             """
@@ -760,7 +760,7 @@ async def _refresh_arbitrage_metrics() -> bool:
                  SELECT id, cme_data_exp, forts_data_exp, cme_price, cme_margin_usd,
                      cme_lot, virt_0, forts_price, price_ratio, forts_margin_rub,
                      forts_price_step, forts_price_step_value, trade_lot_currency
-                 FROM arbitrage_pairs
+                 FROM cme_future_pairs
                  ORDER BY id
                 """
             )
@@ -788,7 +788,7 @@ async def _refresh_arbitrage_metrics() -> bool:
         async with pool.acquire() as connection:
             await connection.executemany(
                 """
-            UPDATE arbitrage_pairs
+            UPDATE cme_future_pairs
             SET forts_trade_lot = $1, diff = $2, diff_percent = $3,
                 diff_ytm_margin = $4, dte = $5
             WHERE id = $6
@@ -810,7 +810,7 @@ async def _save_market_price(column: str, instrument: str, price: object) -> Non
     pool = await create_pool()
     async with pool.acquire() as connection:
         updated = await connection.fetch(
-            f"UPDATE arbitrage_pairs SET {column} = $1::numeric, "
+            f"UPDATE cme_future_pairs SET {column} = $1::numeric, "
             "price_ratio = CASE WHEN price_ratio IS NULL AND COALESCE("
             f"{'$1::numeric' if column == 'cme_price' else 'cme_price'}, 0::numeric) <> 0::numeric "
             "AND COALESCE("
@@ -921,7 +921,7 @@ async def _stream_exante_prices(symbol_ids: list[str]) -> None:
 
 
 async def _restart_market_subscriptions() -> None:
-    """Subscribe exactly to the instruments currently present in arbitrage_pairs."""
+    """Subscribe exactly to the instruments currently present in cme_future_pairs."""
     global _market_data_tasks
     for task in _market_data_tasks:
         task.cancel()
@@ -930,8 +930,8 @@ async def _restart_market_subscriptions() -> None:
 
     pool = await create_pool()
     async with pool.acquire() as connection:
-        cme_symbols = await connection.fetch("SELECT DISTINCT cme_name FROM arbitrage_pairs WHERE cme_name <> ''")
-        forts_tickers = await connection.fetch("SELECT DISTINCT forts_name FROM arbitrage_pairs WHERE COALESCE(forts_name, '') <> ''")
+        cme_symbols = await connection.fetch("SELECT DISTINCT cme_name FROM cme_future_pairs WHERE cme_name <> ''")
+        forts_tickers = await connection.fetch("SELECT DISTINCT forts_name FROM cme_future_pairs WHERE COALESCE(forts_name, '') <> ''")
         moex_tickers = await connection.fetch(
             """
             SELECT pairs.spot_name AS ticker,
@@ -1171,7 +1171,7 @@ async def list_arbitrage_pairs(_: str = Depends(get_current_user)):
                      forts_name, forts_data_exp, forts_price, price_ratio, forts_margin_rub,
                                          forts_price_step, forts_price_step_value, forts_trade_lot, trade_lot_currency, dte, virt_0,
                    diff, diff_percent, diff_ytm_margin
-            FROM arbitrage_pairs
+            FROM cme_future_pairs
             ORDER BY id
             """
         )
@@ -1372,7 +1372,7 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
 
             row = await connection.fetchrow(
                 """
-                INSERT INTO arbitrage_pairs (cme_name, forts_name, trade_lot_currency)
+                INSERT INTO cme_future_pairs (cme_name, forts_name, trade_lot_currency)
                 VALUES ($1, $2, $3)
                 RETURNING id
                 """,
@@ -1392,22 +1392,22 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
     async with pool.acquire() as connection:
         await connection.execute(
             """
-            UPDATE arbitrage_pairs
+            UPDATE cme_future_pairs
             SET
                 cme_data_exp = ex.maturity_date,
                 cme_lot = ex.contract_multiplier,
                 forts_data_exp = (
                     SELECT maturity_date FROM bcs_market_data
-                    WHERE ticker = arbitrage_pairs.forts_name
+                    WHERE ticker = cme_future_pairs.forts_name
                 ),
                 forts_price_step = (
                     SELECT minimum_step FROM bcs_market_data
-                    WHERE ticker = arbitrage_pairs.forts_name
+                    WHERE ticker = cme_future_pairs.forts_name
                 ),
                 forts_price_step_value = NULL
             FROM exante_market_data ex
-            WHERE arbitrage_pairs.id = $1
-              AND ex.symbol_id = arbitrage_pairs.cme_name
+                        WHERE cme_future_pairs.id = $1
+                            AND ex.symbol_id = cme_future_pairs.cme_name
             """,
             row["id"],
         )
@@ -1423,7 +1423,7 @@ async def create_arbitrage_pair(request: PairCreateRequest, _: str = Depends(get
             """
             SELECT id, cme_name, cme_data_exp, forts_name, forts_data_exp, cme_lot,
                    forts_price_step, forts_price_step_value
-            FROM arbitrage_pairs
+            FROM cme_future_pairs
             WHERE id = $1
             """,
             row["id"],
@@ -1440,7 +1440,7 @@ async def delete_arbitrage_pair(
     pool = await create_pool()
     async with pool.acquire() as connection:
         deleted = await connection.fetchval(
-            "DELETE FROM arbitrage_pairs WHERE id = $1 RETURNING id",
+            "DELETE FROM cme_future_pairs WHERE id = $1 RETURNING id",
             pair_id,
         )
     if deleted is None:
@@ -1471,7 +1471,7 @@ async def update_pair_manual_value(
     async with pool.acquire() as connection:
         row = await connection.fetchrow(
             f"""
-            UPDATE arbitrage_pairs
+            UPDATE cme_future_pairs
             SET {request.field} = $1
             WHERE id = $2
             RETURNING id, {request.field} AS value
