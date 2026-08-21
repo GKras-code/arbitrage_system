@@ -65,6 +65,7 @@ _reference_sync_task: asyncio.Task | None = None
 _forts_margin_sync_task: asyncio.Task | None = None
 _currency_rate_sync_task: asyncio.Task | None = None
 _price_update_subscribers: set[asyncio.Queue[None]] = set()
+_arbitrage_metrics_lock = asyncio.Lock()
 ARBITRAGE_PAIR_COLUMNS = {
     "id", "cme_name", "cme_data_exp", "cme_price", "cme_margin_usd", "cme_lot",
     "forts_name", "forts_data_exp", "forts_price", "price_ratio", "forts_margin_rub",
@@ -751,48 +752,50 @@ async def _get_currency_rates() -> list[dict[str, object]]:
 
 async def _refresh_arbitrage_metrics() -> bool:
     """Пересчитать показатели всех пар с последними сохранёнными курсами."""
-    pool = await create_pool()
-    async with pool.acquire() as connection:
-        rows = await connection.fetch(
-            """
+    async with _arbitrage_metrics_lock:
+        pool = await create_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
                  SELECT id, cme_data_exp, forts_data_exp, cme_price, cme_margin_usd,
                      cme_lot, virt_0, forts_price, price_ratio, forts_margin_rub,
                      forts_price_step, forts_price_step_value, trade_lot_currency
-            FROM arbitrage_pairs
-            """
-        )
-
-    currency_rates = await _get_currency_rates()
-    rates_by_currency = {
-        str(rate["currency_code"]): _as_decimal(rate["rate"])
-        for rate in currency_rates
-    }
-    if not rates_by_currency:
-        return False
-
-    today = date.today()
-    updates = [
-        (forts_trade_lot, diff, diff_percent, diff_ytm_margin, dte, row["id"])
-        for row in rows
-        for dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin in [
-            _calculate_pair_metrics(
-                dict(row),
-                rates_by_currency.get(str(row["trade_lot_currency"])),
-                today,
+                 FROM arbitrage_pairs
+                 ORDER BY id
+                """
             )
+
+        currency_rates = await _get_currency_rates()
+        rates_by_currency = {
+            str(rate["currency_code"]): _as_decimal(rate["rate"])
+            for rate in currency_rates
+        }
+        if not rates_by_currency:
+            return False
+
+        today = date.today()
+        updates = [
+            (forts_trade_lot, diff, diff_percent, diff_ytm_margin, dte, row["id"])
+            for row in rows
+            for dte, forts_trade_lot, diff, diff_percent, diff_ytm_margin in [
+                _calculate_pair_metrics(
+                    dict(row),
+                    rates_by_currency.get(str(row["trade_lot_currency"])),
+                    today,
+                )
+            ]
         ]
-    ]
-    async with pool.acquire() as connection:
-        await connection.executemany(
-            """
+        async with pool.acquire() as connection:
+            await connection.executemany(
+                """
             UPDATE arbitrage_pairs
             SET forts_trade_lot = $1, diff = $2, diff_percent = $3,
                 diff_ytm_margin = $4, dte = $5
             WHERE id = $6
             """,
-            updates,
-        )
-    return bool(updates)
+                updates,
+            )
+        return bool(updates)
 
 
 async def _save_market_price(column: str, instrument: str, price: object) -> None:
