@@ -26,6 +26,7 @@
         <nav class="table-tabs" aria-label="Тип таблицы">
           <button type="button" :class="{ 'is-active': activeTable === 'exante_forts' }" @click="selectTable('exante_forts')">EXANTE / CME — FORTS</button>
           <button type="button" :class="{ 'is-active': activeTable === 'moex_spot_future' }" @click="selectTable('moex_spot_future')">MOEX spot — MOEX futures</button>
+          <button type="button" :class="{ 'is-active': activeTable === 'moex_future_future' }" @click="selectTable('moex_future_future')">MOEX futures — MOEX futures</button>
         </nav>
         <section v-if="activeTable === 'exante_forts'" class="add-pair-row">
           <div><p class="section-label">НОВАЯ ПАРА</p><span>Выберите контракты из синхронизированных справочников EXANTE и BCS.</span></div>
@@ -159,6 +160,61 @@
             </div>
           </section>
         </template>
+        <template v-if="activeTable === 'moex_future_future'">
+          <section class="add-pair-row">
+            <div><p class="section-label">НОВАЯ ПАРА</p><span>Выберите два фьючерса MOEX: например USDRUBF и SiU6.</span></div>
+            <form class="add-pair-form moex-pair-form" @submit.prevent="addMoexFutureFuturePair">
+              <div class="pair-fields">
+                <label class="pair-select combobox"><span class="pair-select-label">First future</span>
+                  <div class="combobox-control">
+                    <input ref="firstFutureInput" v-model="newFirstFutureName" class="combobox-input" placeholder="Например USDRUBF" maxlength="100" autocomplete="off" required @focus="onFirstFutureFocus" @input="onFirstFutureInput" @keydown="onFirstFutureKeydown" @blur="onFirstFutureBlur" />
+                    <ul v-if="firstFutureOpen && firstFutureMatches.length" class="combobox-menu" role="listbox">
+                      <li v-for="(match, index) in firstFutureMatches" :key="match.value" role="option" :aria-selected="index === firstFutureHighlight" :class="{ 'is-active': index === firstFutureHighlight }" @mousedown.prevent="pickFirstFuture(match)" @mouseenter="firstFutureHighlight = index">
+                        <span class="combobox-value" v-html="highlightMatch(match.value, newFirstFutureName)"></span><span class="combobox-details">{{ match.details }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                  <small class="pair-hint">{{ firstFutureHint }}</small>
+                </label>
+                <label class="pair-select combobox"><span class="pair-select-label">Second future</span>
+                  <div class="combobox-control">
+                    <input ref="secondFutureInput" v-model="newSecondFutureName" class="combobox-input" placeholder="Например SiU6" maxlength="100" autocomplete="off" required @focus="onSecondFutureFocus" @input="onSecondFutureInput" @keydown="onSecondFutureKeydown" @blur="onSecondFutureBlur" />
+                    <ul v-if="secondFutureOpen && secondFutureMatches.length" class="combobox-menu" role="listbox">
+                      <li v-for="(match, index) in secondFutureMatches" :key="match.value" role="option" :aria-selected="index === secondFutureHighlight" :class="{ 'is-active': index === secondFutureHighlight }" @mousedown.prevent="pickSecondFuture(match)" @mouseenter="secondFutureHighlight = index">
+                        <span class="combobox-value" v-html="highlightMatch(match.value, newSecondFutureName)"></span><span class="combobox-details">{{ match.details }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                  <small class="pair-hint">{{ secondFutureHint }}</small>
+                </label>
+              </div>
+              <button class="primary-button" :disabled="addingMoexFutureFuturePair">{{ addingMoexFutureFuturePair ? 'Добавление...' : 'Добавить пару' }}</button>
+            </form>
+          </section>
+          <section class="table-section">
+            <div class="table-toolbar"><span><i></i> MOEX FUTURES / FUTURES</span><span>{{ moexFutureFuturePairs.length }} инструмент{{ moexFutureFuturePairEnding }}</span></div>
+            <div class="table-wrap"><table class="moex-table"><thead><tr>
+              <th>First name</th><th>First price</th><th>First margin</th><th>First lot</th><th>First exp</th><th>Price ratio</th><th>First trade lot</th><th>Second name</th><th>Second price</th><th>Second margin</th><th>Second lot</th><th>Second exp</th><th>Second trade lot</th><th>DTE</th><th>Virt_0</th><th>Diff</th><th>Diff, %</th><th>Diff, YTM margin</th><th></th>
+            </tr></thead><tbody>
+              <tr v-if="moexFutureFutureLoading"><td colspan="19" class="empty-state">Загрузка данных...</td></tr>
+              <tr v-else-if="!moexFutureFuturePairs.length"><td colspan="19" class="empty-state">Пар MOEX futures — futures пока нет.</td></tr>
+              <tr v-for="pair in moexFutureFuturePairs" :key="pair.id">
+                <td class="instrument">{{ pair.first_name }}</td><td>{{ formatExactNumber(pair.first_price) }}</td><td>{{ formatNumber(pair.first_margin, 4) }}</td><td>{{ formatNumber(pair.first_lot, 4) }}</td><td>{{ formatDate(pair.first_exp) }}</td><td class="editable-cell" @click="startCellEdit(pair, 'price_ratio')"><input v-if="isEditingCell(pair.id, 'price_ratio')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.price_ratio, 6) }}</span></td><td class="editable-cell" @click="startCellEdit(pair, 'first_trade_lot')"><input v-if="isEditingCell(pair.id, 'first_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.first_trade_lot, 4) }}</span></td>
+                <td class="instrument">{{ pair.second_name }}</td><td>{{ formatExactNumber(pair.second_price) }}</td><td>{{ formatNumber(pair.second_margin, 4) }}</td><td>{{ formatNumber(pair.second_lot, 4) }}</td><td>{{ formatDate(pair.second_exp) }}</td><td class="editable-cell" @click="startCellEdit(pair, 'second_trade_lot')"><input v-if="isEditingCell(pair.id, 'second_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.second_trade_lot, 4) }}</span></td><td>{{ pair.dte ?? '—' }}</td><td class="editable-cell" @click="startCellEdit(pair, 'virt_0')"><input v-if="isEditingCell(pair.id, 'virt_0')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.virt_0, 4) }}</span></td><td :class="numberClass(pair.diff)">{{ formatExactNumber(pair.diff) }}</td><td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td><td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td><td class="pair-action"><button class="delete-pair-button" type="button" @click.stop="deleteMoexFutureFuturePair(pair)" aria-label="Удалить пару">×</button></td>
+              </tr>
+            </tbody></table></div>
+          </section>
+          <section class="calculation-legend" aria-label="Формулы расчёта MOEX futures-futures">
+            <div class="calculation-legend-title">ЛЕГЕНДА РАСЧЁТА</div>
+            <div class="calculation-legend-grid">
+              <div><strong>Price ratio</strong><span>При создании и получении котировок: Second price / First price; значение можно изменить вручную.</span></div>
+              <div><strong>Diff</strong><span>Second price − First price × Price ratio − Virt_0</span></div>
+              <div><strong>DTE</strong><span>Количество дней до ближайшей экспирации First или Second future</span></div>
+              <div><strong>Diff, %</strong><span>Diff / max(First margin × First trade lot; Second margin × Second trade lot)</span></div>
+              <div><strong>Diff, YTM margin</strong><span>Diff, % / DTE × 365</span></div>
+            </div>
+          </section>
+        </template>
       </main>
     </template>
   </div>
@@ -178,12 +234,19 @@ const addingPair = ref(false)
 const tableError = ref('')
 const pairs = ref([])
 const moexPairs = ref([])
+const moexFutureFuturePairs = ref([])
 const savedTable = localStorage.getItem('arbitrage_active_table')
-const activeTable = ref(savedTable === 'moex_spot_future' ? savedTable : 'exante_forts')
+const activeTable = ref(['exante_forts', 'moex_spot_future', 'moex_future_future'].includes(savedTable) ? savedTable : 'exante_forts')
 const moexLoading = ref(false)
+const moexFutureFutureLoading = ref(false)
 const addingMoexPair = ref(false)
+const addingMoexFutureFuturePair = ref(false)
 const newSpotName = ref('')
 const newFutureName = ref('')
+const newFirstFutureName = ref('')
+const newSecondFutureName = ref('')
+const firstFutureHint = ref('Начните вводить тикер фьючерса, например USDRUBF.')
+const secondFutureHint = ref('Начните вводить тикер фьючерса, например SiU6.')
 const spotOptions = ref([])
 const futureOptions = ref([])
 const spotHint = ref('Начните вводить тикер акции или валюты MOEX.')
@@ -200,6 +263,18 @@ const futureMatches = ref([])
 const futureTotal = ref(0)
 const futureSuggestion = ref('')
 const futureInput = ref(null)
+const firstFutureOpen = ref(false)
+const firstFutureHighlight = ref(-1)
+const firstFutureMatches = ref([])
+const firstFutureTotal = ref(0)
+const firstFutureSuggestion = ref('')
+const firstFutureInput = ref(null)
+const secondFutureOpen = ref(false)
+const secondFutureHighlight = ref(-1)
+const secondFutureMatches = ref([])
+const secondFutureTotal = ref(0)
+const secondFutureSuggestion = ref('')
+const secondFutureInput = ref(null)
 const sortColumn = ref(null)
 const sortDirection = ref('desc')
 const newCmeName = ref('')
@@ -271,10 +346,41 @@ async function loadMoexPairs(showLoading = true) {
     updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
   } catch (error) { tableError.value = error.message } finally { if (showLoading) moexLoading.value = false }
 }
+async function loadMoexFutureFuturePairs(showLoading = true) {
+  if (showLoading) moexFutureFutureLoading.value = true
+  tableError.value = ''
+  try {
+    const response = await fetch('/api/moex-future-future-pairs', { headers: authHeaders() })
+    if (response.status === 401) return logout()
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Не удалось получить пары future–future')
+    moexFutureFuturePairs.value = data.pairs
+    updatedAt.value = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date())
+  } catch (error) { tableError.value = error.message } finally { if (showLoading) moexFutureFutureLoading.value = false }
+}
 function selectTable(table) {
   activeTable.value = table
   localStorage.setItem('arbitrage_active_table', table)
   if (table === 'moex_spot_future' && !moexPairs.value.length) loadMoexPairs()
+  if (table === 'moex_future_future' && !moexFutureFuturePairs.value.length) loadMoexFutureFuturePairs()
+}
+async function addMoexFutureFuturePair() {
+  addingMoexFutureFuturePair.value = true; tableError.value = ''
+  try {
+    const response = await fetch('/api/moex-future-future-pairs', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ first_name: canonicalValue(futureOptions, newFirstFutureName.value), second_name: canonicalValue(futureOptions, newSecondFutureName.value) }) })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Не удалось добавить пару future–future')
+    newFirstFutureName.value = ''; newSecondFutureName.value = ''; await loadMoexFutureFuturePairs()
+  } catch (error) { tableError.value = error.message } finally { addingMoexFutureFuturePair.value = false }
+}
+async function deleteMoexFutureFuturePair(pair) {
+  if (!window.confirm(`Удалить пару ${pair.first_name} / ${pair.second_name}?`)) return
+  try {
+    const response = await fetch(`/api/moex-future-future-pairs/${pair.id}`, { method: 'DELETE', headers: authHeaders() })
+    if (response.status === 401) return logout()
+    if (!response.ok) throw new Error('Не удалось удалить пару future–future')
+    moexFutureFuturePairs.value = moexFutureFuturePairs.value.filter(item => item.id !== pair.id)
+  } catch (error) { tableError.value = error.message }
 }
 async function addMoexPair() {
   addingMoexPair.value = true; tableError.value = ''
@@ -317,6 +423,7 @@ function schedulePriceRefresh() {
     lastPriceRefresh = now
     loadPairs(false)
     loadMoexPairs(false)
+    loadMoexFutureFuturePairs(false)
     loadCurrencyRates()
     return
   }
@@ -328,6 +435,7 @@ function schedulePriceRefresh() {
     lastPriceRefresh = Date.now()
     loadPairs(false)
     loadMoexPairs(false)
+    loadMoexFutureFuturePairs(false)
     loadCurrencyRates()
   }, remaining)
 }
@@ -439,6 +547,21 @@ async function saveMoexCellEdit(pair) {
     tableError.value = error.message || 'Не удалось сохранить значение'
     nextTick(() => editorInput.value?.focus())
   }
+}
+async function saveMoexFutureFutureCellEdit(pair) {
+  const edit = editingCell.value
+  if (!edit || edit.pairId !== pair.id) return
+  const normalizedValue = validateManualValue(edit.field, edit.value)
+  const key = cellKey(edit.pairId, edit.field)
+  if (normalizedValue === null) { invalidCells.value[key] = true; nextTick(() => editorInput.value?.focus()); return }
+  try {
+    const response = await fetch(`/api/moex-future-future-pairs/${pair.id}/manual-value`, { method: 'PATCH', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ field: edit.field, value: normalizedValue }) })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Не удалось сохранить значение')
+    pair[edit.field] = data.value
+    for (const field of ['diff', 'diff_percent', 'diff_ytm_margin', 'dte']) if (data[field] !== undefined) pair[field] = data[field]
+    delete invalidCells.value[key]; editingCell.value = null
+  } catch (error) { invalidCells.value[key] = true; tableError.value = error.message || 'Не удалось сохранить значение'; nextTick(() => editorInput.value?.focus()) }
 }
 async function loadInstrumentOptions(provider, query = '', instrumentType = '') {
   if (!token.value) return
@@ -592,6 +715,12 @@ function updateFutureMatches() {
     providerLabel: 'MOEX фьючерсы', emptyHint: 'Начните вводить тикер фьючерса MOEX.',
   })
 }
+function updateFutureFutureMatches(query, matches, total, highlight, suggestion, hint) {
+  updateCombobox({
+    options: futureOptions, query, matches, total, highlight, suggestion, hint,
+    providerLabel: 'MOEX фьючерсы', emptyHint: 'Начните вводить тикер фьючерса MOEX.',
+  })
+}
 function highlightMatch(value, query) {
   const foldedQuery = String(query || '').trim().toLowerCase()
   if (!foldedQuery) return escapeHtml(value)
@@ -737,7 +866,35 @@ function onFutureKeydown(event) {
   else if (event.key === 'Tab' && futureSuggestion.value) { event.preventDefault(); newFutureName.value = futureSuggestion.value; updateFutureMatches(); futureOpen.value = true }
   else if (event.key === 'Enter' && futureOpen.value && futureMatches.value.length) { const target = futureMatches.value[Math.max(futureHighlight.value, 0)]; if (target && target.value.toLowerCase() === newFutureName.value.trim().toLowerCase()) { futureOpen.value = false; return }; event.preventDefault(); pickFuture(target) }
 }
-function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; moexPairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
+function onFutureFutureFocus(query, matches, total, highlight, suggestion, hint, open) {
+  open.value = true
+  if (futureOptions.value.length) updateFutureFutureMatches(query, matches, total, highlight, suggestion, hint)
+  else loadInstrumentOptions('bcs', '', 'FUTURES').then(() => { updateFutureFutureMatches(query, matches, total, highlight, suggestion, hint); open.value = true })
+}
+function onFirstFutureFocus() { onFutureFutureFocus(newFirstFutureName, firstFutureMatches, firstFutureTotal, firstFutureHighlight, firstFutureSuggestion, firstFutureHint, firstFutureOpen) }
+function onSecondFutureFocus() { onFutureFutureFocus(newSecondFutureName, secondFutureMatches, secondFutureTotal, secondFutureHighlight, secondFutureSuggestion, secondFutureHint, secondFutureOpen) }
+function onFutureFutureInput(event, query, matches, total, highlight, suggestion, hint, open) {
+  open.value = true
+  updateFutureFutureMatches(query, matches, total, highlight, suggestion, hint)
+}
+function onFirstFutureInput(event) { onFutureFutureInput(event, newFirstFutureName, firstFutureMatches, firstFutureTotal, firstFutureHighlight, firstFutureSuggestion, firstFutureHint, firstFutureOpen) }
+function onSecondFutureInput(event) { onFutureFutureInput(event, newSecondFutureName, secondFutureMatches, secondFutureTotal, secondFutureHighlight, secondFutureSuggestion, secondFutureHint, secondFutureOpen) }
+function onFutureFutureBlur(open, highlight) { setTimeout(() => { open.value = false; highlight.value = -1 }, 150) }
+function onFirstFutureBlur() { onFutureFutureBlur(firstFutureOpen, firstFutureHighlight) }
+function onSecondFutureBlur() { onFutureFutureBlur(secondFutureOpen, secondFutureHighlight) }
+function pickFutureFuture(query, match, open, input) { query.value = match.value; open.value = false; nextTick(() => input.value?.focus()) }
+function pickFirstFuture(match) { pickFutureFuture(newFirstFutureName, match, firstFutureOpen, firstFutureInput) }
+function pickSecondFuture(match) { pickFutureFuture(newSecondFutureName, match, secondFutureOpen, secondFutureInput) }
+function onFutureFutureKeydown(event, query, matches, total, highlight, suggestion, hint, open, input) {
+  if (event.key === 'ArrowDown') { event.preventDefault(); open.value = true; if (matches.value.length) highlight.value = Math.min(highlight.value + 1, matches.value.length - 1) }
+  else if (event.key === 'ArrowUp') { event.preventDefault(); open.value = true; if (matches.value.length) highlight.value = Math.max(highlight.value - 1, 0) }
+  else if (event.key === 'Escape') { event.preventDefault(); open.value = false; highlight.value = -1 }
+  else if (event.key === 'Tab' && suggestion.value) { event.preventDefault(); query.value = suggestion.value; updateFutureFutureMatches(query, matches, total, highlight, suggestion, hint); open.value = true }
+  else if (event.key === 'Enter' && open.value && matches.value.length) { const target = matches.value[Math.max(highlight.value, 0)]; if (target && target.value.toLowerCase() === query.value.trim().toLowerCase()) { open.value = false; return }; event.preventDefault(); pickFutureFuture(query, target, open, input) }
+}
+function onFirstFutureKeydown(event) { onFutureFutureKeydown(event, newFirstFutureName, firstFutureMatches, firstFutureTotal, firstFutureHighlight, firstFutureSuggestion, firstFutureHint, firstFutureOpen, firstFutureInput) }
+function onSecondFutureKeydown(event) { onFutureFutureKeydown(event, newSecondFutureName, secondFutureMatches, secondFutureTotal, secondFutureHighlight, secondFutureSuggestion, secondFutureHint, secondFutureOpen, secondFutureInput) }
+function logout() { priceEvents?.close(); priceEvents = null; token.value = ''; username.value = ''; pairs.value = []; moexPairs.value = []; moexFutureFuturePairs.value = []; localStorage.removeItem('arbitrage_token'); localStorage.removeItem('arbitrage_username') }
 function formatDate(value) { return value ? new Intl.DateTimeFormat('ru-RU').format(new Date(`${value}T00:00:00`)) : '—' }
 function formatNumber(value, maximumFractionDigits = 2) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits }).format(value) }
 function formatExactNumber(value) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 20 }).format(value) }
@@ -764,9 +921,10 @@ const sortedPairs = computed(() => {
 const currencyRateDate = computed(() => currencyRates.value[0]?.rate_date ? formatDate(currencyRates.value[0].rate_date) : '—')
 const pairEnding = computed(() => { const remainder = pairs.value.length % 10; return remainder === 1 && pairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
 const moexPairEnding = computed(() => { const remainder = moexPairs.value.length % 10; return remainder === 1 && moexPairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
+const moexFutureFuturePairEnding = computed(() => { const remainder = moexFutureFuturePairs.value.length % 10; return remainder === 1 && moexFutureFuturePairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
 const visibleColumnCount = computed(() => showContractDetails.value ? 20 : 13)
 const moexVisibleColumnCount = computed(() => moexShowContractDetails.value ? 18 : 10)
-onMounted(() => { if (authenticated.value) { loadPairs(); if (activeTable.value === 'moex_spot_future') loadMoexPairs(); loadCurrencyRates(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs'); loadInstrumentOptions('bcs', '', 'SPOT'); loadInstrumentOptions('bcs', '', 'FUTURES') } })
+onMounted(() => { if (authenticated.value) { loadPairs(); if (activeTable.value === 'moex_spot_future') loadMoexPairs(); if (activeTable.value === 'moex_future_future') loadMoexFutureFuturePairs(); loadCurrencyRates(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs'); loadInstrumentOptions('bcs', '', 'SPOT'); loadInstrumentOptions('bcs', '', 'FUTURES') } })
 onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
 </script>
 

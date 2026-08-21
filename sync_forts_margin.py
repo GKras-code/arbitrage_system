@@ -82,10 +82,19 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
     if tickers is None:
         async with pool.acquire() as connection:
             rows = await connection.fetch(
-                "SELECT DISTINCT forts_name FROM cme_future_pairs "
-                "WHERE COALESCE(forts_name, '') <> ''"
+                """
+                SELECT forts_name AS ticker FROM cme_future_pairs
+                WHERE COALESCE(forts_name, '') <> ''
+                UNION
+                SELECT first_name AS ticker FROM moex_future_future_pairs
+                UNION
+                SELECT second_name AS ticker FROM moex_future_future_pairs
+                UNION
+                SELECT future_name AS ticker FROM moex_spot_future_pairs
+                WHERE COALESCE(future_name, '') <> ''
+                """
             )
-        ticker_list = [str(row["forts_name"]) for row in rows]
+        ticker_list = [str(row["ticker"]) for row in rows if row["ticker"]]
     else:
         ticker_list = list(dict.fromkeys(ticker.strip() for ticker in tickers if ticker.strip()))
 
@@ -144,6 +153,33 @@ async def sync_forts_market_parameters(tickers: Iterable[str] | None = None) -> 
             "forts_price_step_value = COALESCE($2, forts_price_step_value) "
             "WHERE id = $3",
             pair_updates,
+        )
+        future_future_pairs = await connection.fetch(
+            """
+            SELECT id, first_name, second_name
+            FROM moex_future_future_pairs
+            WHERE first_name = ANY($1::varchar[]) OR second_name = ANY($1::varchar[])
+            """,
+            list(parameters_by_ticker),
+        )
+        future_future_updates = [
+            (
+                ticker,
+                parameters_by_ticker[ticker][0],
+                row["id"],
+            )
+            for row in future_future_pairs
+            for ticker in (str(row["first_name"]), str(row["second_name"]))
+            if ticker in parameters_by_ticker
+        ]
+        await connection.executemany(
+            """
+            UPDATE moex_future_future_pairs
+            SET first_margin = CASE WHEN first_name = $1 THEN $2 ELSE first_margin END,
+                second_margin = CASE WHEN second_name = $1 THEN $2 ELSE second_margin END
+            WHERE id = $3
+            """,
+            future_future_updates,
         )
         moex_pairs = await connection.fetch(
             """

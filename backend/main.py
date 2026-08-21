@@ -91,8 +91,14 @@ class MoexSpotFuturePairCreateRequest(BaseModel):
     spot_dividend: Decimal = Decimal("0")
 
 
+class MoexFutureFuturePairCreateRequest(BaseModel):
+    first_name: str = Field(min_length=1, max_length=100)
+    second_name: str = Field(min_length=1, max_length=100)
+    price_ratio: Decimal | None = None
+
+
 class PairManualValueUpdate(BaseModel):
-    field: Literal["virt_0", "price_ratio", "cme_margin_usd", "spot_trade_lot", "future_trade_lot", "discount", "spot_dividend"]
+    field: Literal["virt_0", "price_ratio", "cme_margin_usd", "spot_trade_lot", "future_trade_lot", "discount", "spot_dividend", "first_trade_lot", "second_trade_lot"]
     value: Decimal
 
     @field_validator("value", mode="before")
@@ -446,6 +452,30 @@ async def initialize_database() -> None:
                 UNIQUE (spot_name, future_name)
             );
 
+            CREATE TABLE IF NOT EXISTS moex_future_future_pairs (
+                id BIGSERIAL PRIMARY KEY,
+                first_name VARCHAR(100) NOT NULL,
+                first_price NUMERIC(18, 6),
+                first_margin NUMERIC(18, 6),
+                first_lot NUMERIC(18, 6),
+                first_exp DATE,
+                price_ratio NUMERIC(18, 6) NOT NULL DEFAULT 1,
+                first_trade_lot NUMERIC(18, 6),
+                second_name VARCHAR(100) NOT NULL,
+                second_price NUMERIC(18, 6),
+                second_margin NUMERIC(18, 6),
+                second_lot NUMERIC(18, 6),
+                second_exp DATE,
+                second_trade_lot NUMERIC(18, 6),
+                dte INTEGER,
+                virt_0 NUMERIC(18, 6) NOT NULL DEFAULT 0,
+                diff NUMERIC(18, 6),
+                diff_percent NUMERIC(18, 6),
+                diff_ytm_margin NUMERIC(18, 6),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (first_name, second_name)
+            );
+
             CREATE TABLE IF NOT EXISTS currency_rates (
                 currency_code VARCHAR(3) PRIMARY KEY,
                 rate NUMERIC(18, 6) NOT NULL,
@@ -466,6 +496,25 @@ async def initialize_database() -> None:
         await connection.execute(
             "ALTER TABLE moex_spot_future_pairs "
             "DROP COLUMN IF EXISTS price_ratio"
+        )
+        await connection.execute(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'moex_future_future_pairs'
+                      AND column_name = 'first_price_ratio'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'moex_future_future_pairs'
+                      AND column_name = 'price_ratio'
+                ) THEN
+                    ALTER TABLE moex_future_future_pairs
+                    RENAME COLUMN first_price_ratio TO price_ratio;
+                END IF;
+            END $$;
+            """
         )
         await connection.execute(
             """
@@ -638,6 +687,38 @@ async def _refresh_moex_metrics() -> bool:
                 END
             FROM metrics
             WHERE pairs.id = metrics.id
+            RETURNING pairs.id
+            """
+        )
+    return bool(updated)
+
+
+async def _refresh_moex_future_future_metrics() -> bool:
+    """Пересчитать метрики пар MOEX future-future."""
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        updated = await connection.fetch(
+            """
+            WITH calculated AS (
+                SELECT id,
+                       LEAST(first_exp, second_exp) - CURRENT_DATE AS dte,
+                       second_price - first_price * price_ratio - virt_0 AS diff,
+                       GREATEST(first_margin * first_trade_lot, second_margin * second_trade_lot) AS total_margin
+                FROM moex_future_future_pairs
+            )
+            UPDATE moex_future_future_pairs AS pairs
+            SET dte = calculated.dte,
+                diff = CASE WHEN calculated.dte > 0 THEN calculated.diff END,
+                diff_percent = CASE
+                    WHEN calculated.dte > 0 AND calculated.total_margin <> 0
+                    THEN calculated.diff / calculated.total_margin
+                END,
+                diff_ytm_margin = CASE
+                    WHEN calculated.dte > 0 AND calculated.total_margin <> 0
+                    THEN calculated.diff / calculated.total_margin / calculated.dte * 365
+                END
+            FROM calculated
+            WHERE pairs.id = calculated.id
             RETURNING pairs.id
             """
         )
@@ -852,8 +933,27 @@ async def _save_moex_market_price(instrument: str, price: object) -> None:
             value,
             instrument,
         )
-    if updated:
+        future_future_updated = await connection.fetch(
+            """
+            UPDATE moex_future_future_pairs
+            SET first_price = CASE WHEN first_name = $2 THEN $1 ELSE first_price END,
+                second_price = CASE WHEN second_name = $2 THEN $1 ELSE second_price END,
+                price_ratio = CASE
+                    WHEN price_ratio = 1 AND first_name = $2 AND second_price IS NOT NULL AND $1 <> 0
+                        THEN ROUND(second_price / $1, 0)
+                    WHEN price_ratio = 1 AND second_name = $2 AND first_price IS NOT NULL AND first_price <> 0
+                        THEN ROUND($1 / first_price, 0)
+                    ELSE price_ratio
+                END
+            WHERE first_name = $2 OR second_name = $2
+            RETURNING id
+            """,
+            value,
+            instrument,
+        )
+    if updated or future_future_updated:
         await _refresh_moex_metrics()
+        await _refresh_moex_future_future_metrics()
         await _publish_price_update()
 
 
@@ -945,6 +1045,16 @@ async def _restart_market_subscriptions() -> None:
             BCS_STOCK_CLASS_CODE,
             BCS_FUTURES_CLASS_CODE,
         )
+        moex_future_future_tickers = await connection.fetch(
+            """
+            SELECT first_name AS ticker, $1::text AS class_code
+            FROM moex_future_future_pairs
+            UNION
+            SELECT second_name AS ticker, $1::text AS class_code
+            FROM moex_future_future_pairs
+            """,
+            BCS_FUTURES_CLASS_CODE,
+        )
 
     _market_data_tasks = []
     exante_auth_configured = (
@@ -979,6 +1089,15 @@ async def _restart_market_subscriptions() -> None:
         _market_data_tasks.append(asyncio.create_task(
             _stream_bcs_prices(instruments, load_last_prices=True),
             name="bcs-moex-price-stream",
+        ))
+    if moex_future_future_tickers and os.getenv("BCS_REFRESH_TOKEN"):
+        instruments = [
+            {"ticker": row["ticker"], "classCode": row["class_code"]}
+            for row in moex_future_future_tickers
+        ]
+        _market_data_tasks.append(asyncio.create_task(
+            _stream_bcs_prices(instruments, load_last_prices=True),
+            name="bcs-moex-future-future-price-stream",
         ))
 
 
@@ -1305,6 +1424,130 @@ async def delete_moex_spot_future_pair(
     async with pool.acquire() as connection:
         deleted = await connection.fetchval(
             "DELETE FROM moex_spot_future_pairs WHERE id = $1 RETURNING id", pair_id
+        )
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Пара не найдена")
+    await _restart_market_subscriptions()
+
+
+@app.get("/api/moex-future-future-pairs")
+async def list_moex_future_future_pairs(_: str = Depends(get_current_user)):
+    await _refresh_moex_future_future_metrics()
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT id, first_name, first_price, first_margin, first_lot, first_exp,
+                   price_ratio, first_trade_lot, second_name, second_price,
+                   second_margin, second_lot, second_exp, second_trade_lot,
+                   dte, virt_0, diff, diff_percent, diff_ytm_margin
+            FROM moex_future_future_pairs
+            ORDER BY id
+            """
+        )
+    return {"pairs": [dict(row) for row in rows]}
+
+
+@app.post("/api/moex-future-future-pairs", status_code=status.HTTP_201_CREATED)
+async def create_moex_future_future_pair(
+    request: MoexFutureFuturePairCreateRequest,
+    _: str = Depends(get_current_user),
+):
+    first_name = request.first_name.strip()
+    second_name = request.second_name.strip()
+    if first_name == second_name:
+        raise HTTPException(status_code=400, detail="Фьючерсы в паре должны отличаться")
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        instruments = await connection.fetch(
+            """
+            SELECT ticker, instrument_type, lot_size, maturity_date
+            FROM bcs_market_data
+            WHERE ticker = ANY($1::text[])
+            """,
+            [first_name, second_name],
+        )
+        by_ticker = {str(row["ticker"]): row for row in instruments}
+        first = by_ticker.get(first_name)
+        second = by_ticker.get(second_name)
+        if first is None or str(first["instrument_type"]).upper() != "FUTURES":
+            raise HTTPException(status_code=400, detail="Первый фьючерс отсутствует в справочнике BCS")
+        if second is None or str(second["instrument_type"]).upper() != "FUTURES":
+            raise HTTPException(status_code=400, detail="Второй фьючерс отсутствует в справочнике BCS")
+        try:
+            row = await connection.fetchrow(
+                """
+                INSERT INTO moex_future_future_pairs (
+                    first_name, first_lot, price_ratio, first_trade_lot,
+                    second_name, second_lot, second_exp, second_trade_lot, first_exp
+                )
+                VALUES ($1, $2, $3, $2, $4, $5, $6, $5, $7)
+                RETURNING id
+                """,
+                first_name,
+                first["lot_size"],
+                request.price_ratio if request.price_ratio is not None else Decimal("1"),
+                second_name,
+                second["lot_size"],
+                second["maturity_date"],
+                first["maturity_date"],
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="Такая пара уже существует") from None
+    await _restart_market_subscriptions()
+    try:
+        await sync_forts_market_parameters([first_name, second_name])
+    except Exception as error:
+        print(f"Ошибка первичной загрузки ГО фьючерсов MOEX: {error}", flush=True)
+    await _refresh_moex_future_future_metrics()
+    return {"id": row["id"]}
+
+
+@app.patch("/api/moex-future-future-pairs/{pair_id}/manual-value")
+async def update_moex_future_future_manual_value(
+    pair_id: int,
+    request: PairManualValueUpdate,
+    _: str = Depends(get_current_user),
+):
+    if request.field not in {"price_ratio", "first_trade_lot", "second_trade_lot", "virt_0"}:
+        raise HTTPException(status_code=400, detail="Это поле нельзя изменить для пары future–future")
+    if request.field in {"price_ratio", "first_trade_lot", "second_trade_lot"} and request.value <= 0:
+        raise HTTPException(status_code=422, detail="Значение должно быть больше нуля")
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        updated = await connection.fetchrow(
+            f"""
+            UPDATE moex_future_future_pairs
+            SET {request.field} = $1
+            WHERE id = $2
+            RETURNING {request.field} AS value
+            """,
+            request.value,
+            pair_id,
+        )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Пара future–future не найдена")
+    await _refresh_moex_future_future_metrics()
+    async with pool.acquire() as connection:
+        metrics = await connection.fetchrow(
+            """
+            SELECT dte, diff, diff_percent, diff_ytm_margin
+            FROM moex_future_future_pairs WHERE id = $1
+            """,
+            pair_id,
+        )
+    return {"value": updated["value"], **dict(metrics)}
+
+
+@app.delete("/api/moex-future-future-pairs/{pair_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_moex_future_future_pair(
+    pair_id: int,
+    _: str = Depends(get_current_user),
+):
+    pool = await create_pool()
+    async with pool.acquire() as connection:
+        deleted = await connection.fetchval(
+            "DELETE FROM moex_future_future_pairs WHERE id = $1 RETURNING id", pair_id
         )
     if deleted is None:
         raise HTTPException(status_code=404, detail="Пара не найдена")
