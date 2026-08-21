@@ -594,9 +594,17 @@ async def _refresh_moex_metrics() -> bool:
             calculated AS (
                 SELECT *,
                        CASE
-                          WHEN spot_price IS NOT NULL AND spot_lot IS NOT NULL AND spot_lot <> 0
-                              AND future_lot IS NOT NULL AND future_price IS NOT NULL
-                          THEN future_price - spot_price * future_lot / spot_lot + COALESCE(spot_dividend, 0)
+                          WHEN spot_instrument_type = 'STOCK'
+                              AND spot_price IS NOT NULL
+                              AND future_lot IS NOT NULL
+                              AND future_price IS NOT NULL
+                          THEN future_price - spot_price * future_lot + COALESCE(spot_dividend, 0)
+                          WHEN spot_instrument_type = 'CURRENCY'
+                              AND spot_price IS NOT NULL
+                              AND spot_lot IS NOT NULL AND spot_lot <> 0
+                              AND future_lot IS NOT NULL
+                              AND future_price IS NOT NULL
+                          THEN future_price - spot_price * future_lot / spot_lot
                        END AS diff
                 FROM base
             ),

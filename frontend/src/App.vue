@@ -151,7 +151,7 @@
             <div class="calculation-legend-title">ЛЕГЕНДА РАСЧЁТА</div>
             <div class="calculation-legend-grid">
               <div><strong>Spot margin</strong><span>Spot price × Spot lot × Discount</span></div>
-              <div><strong>Diff</strong><span>Future price − Spot price × (Future lot / Spot lot) + Dividend</span></div>
+              <div><strong>Diff</strong><span>Акция: Future price − Spot price × Future lot + Dividend; валюта: Future price − Spot price × Future lot / Spot lot + Dividend</span></div>
               <div><strong>DTE</strong><span>Количество дней до экспирации Future</span></div>
               <div><strong>Акция — Diff, %</strong><span>Diff / (Spot margin × Spot trade lot + Future margin)</span></div>
               <div><strong>Валюта — Diff, %</strong><span>Diff × Spot lot / max(Spot margin × Spot trade lot; Future margin × Future trade lot)</span></div>
