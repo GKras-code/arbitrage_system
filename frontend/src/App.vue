@@ -192,15 +192,15 @@
             </form>
           </section>
           <section class="table-section">
-            <div class="table-toolbar"><span><i></i> MOEX FUTURES / FUTURES</span><span>{{ moexFutureFuturePairs.length }} инструмент{{ moexFutureFuturePairEnding }}</span></div>
-            <div class="table-wrap"><table class="moex-table"><thead><tr>
-              <th>First name</th><th>First price</th><th>First margin</th><th>First lot</th><th>First exp</th><th>Price ratio</th><th>First trade lot</th><th>Second name</th><th>Second price</th><th>Second margin</th><th>Second lot</th><th>Second exp</th><th>Second trade lot</th><th>DTE</th><th>Virt_0</th><th>Diff</th><th>Diff, %</th><th>Diff, YTM margin</th><th></th>
+            <div class="table-toolbar"><span><i></i> MOEX FUTURES / FUTURES</span><div class="table-toolbar-actions"><span>{{ moexFutureFuturePairs.length }} инструмент{{ moexFutureFuturePairEnding }}</span><button class="details-toggle" type="button" :aria-expanded="moexFutureFutureShowContractDetails" @click="moexFutureFutureShowContractDetails = !moexFutureFutureShowContractDetails">{{ moexFutureFutureShowContractDetails ? 'Скрыть параметры' : 'Параметры контрактов' }}</button></div></div>
+            <div class="table-wrap"><table class="moex-table" :class="{ 'is-compact': !moexFutureFutureShowContractDetails }"><thead><tr>
+              <th>First name</th><th>First price</th><th>First margin</th><th v-if="moexFutureFutureShowContractDetails">First lot</th><th v-if="moexFutureFutureShowContractDetails">First exp</th><th>Price ratio</th><th v-if="moexFutureFutureShowContractDetails">First trade lot</th><th>Second name</th><th>Second price</th><th>Second margin</th><th v-if="moexFutureFutureShowContractDetails">Second lot</th><th v-if="moexFutureFutureShowContractDetails">Second exp</th><th v-if="moexFutureFutureShowContractDetails">Second trade lot</th><th>DTE</th><th>Virt_0</th><th>Diff</th><th>Diff, %</th><th>Diff, YTM margin</th><th></th>
             </tr></thead><tbody>
-              <tr v-if="moexFutureFutureLoading"><td colspan="19" class="empty-state">Загрузка данных...</td></tr>
-              <tr v-else-if="!moexFutureFuturePairs.length"><td colspan="19" class="empty-state">Пар MOEX futures — futures пока нет.</td></tr>
+              <tr v-if="moexFutureFutureLoading"><td :colspan="moexFutureFutureVisibleColumnCount" class="empty-state">Загрузка данных...</td></tr>
+              <tr v-else-if="!moexFutureFuturePairs.length"><td :colspan="moexFutureFutureVisibleColumnCount" class="empty-state">Пар MOEX futures — futures пока нет.</td></tr>
               <tr v-for="pair in moexFutureFuturePairs" :key="pair.id">
-                <td class="instrument">{{ pair.first_name }}</td><td>{{ formatExactNumber(pair.first_price) }}</td><td>{{ formatNumber(pair.first_margin, 4) }}</td><td>{{ formatNumber(pair.first_lot, 4) }}</td><td>{{ formatDate(pair.first_exp) }}</td><td class="editable-cell" @click="startCellEdit(pair, 'price_ratio')"><input v-if="isEditingCell(pair.id, 'price_ratio')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.price_ratio, 6) }}</span></td><td class="editable-cell" @click="startCellEdit(pair, 'first_trade_lot')"><input v-if="isEditingCell(pair.id, 'first_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.first_trade_lot, 4) }}</span></td>
-                <td class="instrument">{{ pair.second_name }}</td><td>{{ formatExactNumber(pair.second_price) }}</td><td>{{ formatNumber(pair.second_margin, 4) }}</td><td>{{ formatNumber(pair.second_lot, 4) }}</td><td>{{ formatDate(pair.second_exp) }}</td><td class="editable-cell" @click="startCellEdit(pair, 'second_trade_lot')"><input v-if="isEditingCell(pair.id, 'second_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.second_trade_lot, 4) }}</span></td><td>{{ pair.dte ?? '—' }}</td><td class="editable-cell" @click="startCellEdit(pair, 'virt_0')"><input v-if="isEditingCell(pair.id, 'virt_0')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.virt_0, 4) }}</span></td><td :class="numberClass(pair.diff)">{{ formatExactNumber(pair.diff) }}</td><td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td><td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td><td class="pair-action"><button class="delete-pair-button" type="button" @click.stop="deleteMoexFutureFuturePair(pair)" aria-label="Удалить пару">×</button></td>
+                <td class="instrument">{{ pair.first_name }}</td><td>{{ formatExactNumber(pair.first_price) }}</td><td>{{ formatNumber(pair.first_margin, 4) }}</td><td v-if="moexFutureFutureShowContractDetails">{{ formatNumber(pair.first_lot, 4) }}</td><td v-if="moexFutureFutureShowContractDetails">{{ formatDate(pair.first_exp) }}</td><td class="editable-cell" @click="startCellEdit(pair, 'price_ratio')"><input v-if="isEditingCell(pair.id, 'price_ratio')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.price_ratio, 6) }}</span></td><td v-if="moexFutureFutureShowContractDetails" class="editable-cell" @click="startCellEdit(pair, 'first_trade_lot')"><input v-if="isEditingCell(pair.id, 'first_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.first_trade_lot, 4) }}</span></td>
+                <td class="instrument">{{ pair.second_name }}</td><td>{{ formatExactNumber(pair.second_price) }}</td><td>{{ formatNumber(pair.second_margin, 4) }}</td><td v-if="moexFutureFutureShowContractDetails">{{ formatNumber(pair.second_lot, 4) }}</td><td v-if="moexFutureFutureShowContractDetails">{{ formatDate(pair.second_exp) }}</td><td v-if="moexFutureFutureShowContractDetails" class="editable-cell" @click="startCellEdit(pair, 'second_trade_lot')"><input v-if="isEditingCell(pair.id, 'second_trade_lot')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.second_trade_lot, 4) }}</span></td><td>{{ pair.dte ?? '—' }}</td><td class="editable-cell" @click="startCellEdit(pair, 'virt_0')"><input v-if="isEditingCell(pair.id, 'virt_0')" :ref="setEditorInput" v-model="editingCell.value" inputmode="decimal" @blur="saveMoexFutureFutureCellEdit(pair)" @keydown.enter.prevent="saveMoexFutureFutureCellEdit(pair)" @keydown.esc.prevent="cancelCellEdit" /><span v-else>{{ formatNumber(pair.virt_0, 4) }}</span></td><td :class="numberClass(pair.diff)">{{ formatExactNumber(pair.diff) }}</td><td :class="numberClass(pair.diff_percent)">{{ formatPercent(pair.diff_percent) }}</td><td :class="numberClass(pair.diff_ytm_margin)">{{ formatPercent(pair.diff_ytm_margin) }}</td><td class="pair-action"><button class="delete-pair-button" type="button" @click.stop="deleteMoexFutureFuturePair(pair)" aria-label="Удалить пару">×</button></td>
               </tr>
             </tbody></table></div>
           </section>
@@ -303,6 +303,7 @@ const editorInput = ref(null)
 const invalidCells = ref({})
 const showContractDetails = ref(false)
 const moexShowContractDetails = ref(false)
+const moexFutureFutureShowContractDetails = ref(false)
 const deletingPairId = ref(null)
 let priceEvents = null
 let priceRefreshTimer = null
@@ -924,6 +925,7 @@ const moexPairEnding = computed(() => { const remainder = moexPairs.value.length
 const moexFutureFuturePairEnding = computed(() => { const remainder = moexFutureFuturePairs.value.length % 10; return remainder === 1 && moexFutureFuturePairs.value.length % 100 !== 11 ? '' : remainder >= 2 && remainder <= 4 ? 'а' : 'ов' })
 const visibleColumnCount = computed(() => showContractDetails.value ? 20 : 13)
 const moexVisibleColumnCount = computed(() => moexShowContractDetails.value ? 18 : 10)
+const moexFutureFutureVisibleColumnCount = computed(() => moexFutureFutureShowContractDetails.value ? 19 : 13)
 onMounted(() => { if (authenticated.value) { loadPairs(); if (activeTable.value === 'moex_spot_future') loadMoexPairs(); if (activeTable.value === 'moex_future_future') loadMoexFutureFuturePairs(); loadCurrencyRates(); connectPriceEvents(); loadInstrumentOptions('exante'); loadInstrumentOptions('bcs'); loadInstrumentOptions('bcs', '', 'SPOT'); loadInstrumentOptions('bcs', '', 'FUTURES') } })
 onBeforeUnmount(() => { priceEvents?.close(); if (priceRefreshTimer) clearTimeout(priceRefreshTimer) })
 </script>
@@ -974,13 +976,6 @@ label { display: block; margin: 15px 0; color: #aeb9b3; font: 500 11px 'IBM Plex
 .table-tabs button.is-active { color: #77d6b6; border-top-color: #77d6b6; }
 .moex-table { min-width: 1680px; }
 .moex-table.is-compact { min-width: 920px; table-layout: fixed; }
-.moex-table.is-compact td:nth-child(3),
-.moex-table.is-compact td:nth-child(5),
-.moex-table.is-compact td:nth-child(6),
-.moex-table.is-compact td:nth-child(7),
-.moex-table.is-compact td:nth-child(11),
-.moex-table.is-compact td:nth-child(12),
-.moex-table.is-compact td:nth-child(13) { display: none; }
 .calculation-legend { margin-top: 12px; border: 1px solid #35423d; background: #141a18; }
 .calculation-legend-title { padding: 10px 12px; border-bottom: 1px solid #35423d; color: #77d6b6; font: 600 10px 'IBM Plex Mono', monospace; letter-spacing: 1px; }
 .calculation-legend-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: #35423d; }
